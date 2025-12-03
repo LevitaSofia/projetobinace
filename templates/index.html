@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🏗️ Laboratório de Trading Híbrido</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        :root {
+            --dark-bg: #0d1117;
+            --card-bg: #161b22;
+            --border: #30363d;
+            --yellow: #fcd535;
+            --green: #0ecb81;
+            --red: #f6465d;
+            --text: #c9d1d9;
+        }
+
+        body {
+            background-color: var(--dark-bg);
+            color: var(--text);
+            font-family: 'Inter', sans-serif;
+            padding: 20px;
+        }
+
+        .card {
+            background-color: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+        }
+
+        .card-header-custom {
+            font-size: 1.1rem;
+            font-weight: 600;
+            margin-bottom: 15px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .balance-large {
+            font-size: 2.5rem;
+            font-weight: bold;
+            color: var(--yellow);
+        }
+
+        .profit-positive {
+            color: var(--green);
+        }
+
+        .profit-negative {
+            color: var(--red);
+        }
+
+        .strategy-card {
+            position: relative;
+            transition: all 0.3s ease;
+        }
+
+        .strategy-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 8px 12px rgba(0, 0, 0, 0.4);
+        }
+
+        .strategy-card.selected {
+            border: 2px solid var(--yellow);
+        }
+
+        .radio-custom {
+            width: 20px;
+            height: 20px;
+            cursor: pointer;
+        }
+
+        .switch-large {
+            transform: scale(1.5);
+            margin-left: 10px;
+        }
+
+        .live-indicator {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            display: inline-block;
+            margin-right: 8px;
+        }
+
+        .live-indicator.active {
+            background-color: var(--green);
+            box-shadow: 0 0 10px var(--green);
+        }
+
+        .live-indicator.inactive {
+            background-color: var(--border);
+        }
+
+        .trade-list {
+            max-height: 200px;
+            overflow-y: auto;
+            font-size: 0.85rem;
+        }
+
+        .trade-item {
+            padding: 8px;
+            margin: 4px 0;
+            background-color: var(--dark-bg);
+            border-radius: 6px;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container-fluid">
+        <!-- Header -->
+        <div class="row mb-4">
+            <div class="col-12">
+                <h1 class="text-center">
+                    <i class="fas fa-flask"></i> Laboratório de Trading Híbrido
+                </h1>
+                <p class="text-center text-muted">
+                    Testando 3 estratégias simultaneamente | Preço BTC: $<span id="current-price">0.00</span> |
+                    Atualizado: <span id="last-update">--:--:--</span>
+                </p>
+            </div>
+        </div>
+
+        <!-- Real Balance Card -->
+        <div class="row mb-4">
+            <div class="col-12">
+                <div class="card">
+                    <div class="card-header-custom">
+                        <span><i class="fas fa-wallet"></i> Saldo Real Binance (Validação)</span>
+                        <span>USDT: <span class="balance-large" id="real-balance">0.00</span></span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Strategies Cards -->
+        <div class="row">
+            <!-- Conservative -->
+            <div class="col-md-4">
+                <div class="card strategy-card" id="card-conservative">
+                    <div class="card-header-custom">
+                        <div>
+                            <input type="radio" name="strategy" value="conservative" class="radio-custom"
+                                onchange="selectStrategy('conservative')">
+                            <span class="ms-2">🛡️ Conservador</span>
+                        </div>
+                        <span class="badge bg-secondary">RSI<30 + BB</span>
+                    </div>
+                    <div class="balance-large" id="balance-conservative">$100.00</div>
+                    <div class="mt-2">
+                        Lucro: <span id="profit-conservative" class="profit-positive">+0.00%</span>
+                    </div>
+                    <div class="trade-list mt-3" id="trades-conservative">
+                        <div class="text-muted">Aguardando operações...</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Aggressive -->
+            <div class="col-md-4">
+                <div class="card strategy-card" id="card-aggressive">
+                    <div class="card-header-custom">
+                        <div>
+                            <input type="radio" name="strategy" value="aggressive" class="radio-custom"
+                                onchange="selectStrategy('aggressive')">
+                            <span class="ms-2">🚀 Agressivo</span>
+                        </div>
+                        <span class="badge bg-danger">RSI<45 + BB</span>
+                    </div>
+                    <div class="balance-large" id="balance-aggressive">$100.00</div>
+                    <div class="mt-2">
+                        Lucro: <span id="profit-aggressive" class="profit-positive">+0.00%</span>
+                    </div>
+                    <div class="trade-list mt-3" id="trades-aggressive">
+                        <div class="text-muted">Aguardando operações...</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- RSI Pure -->
+            <div class="col-md-4">
+                <div class="card strategy-card" id="card-rsi_pure">
+                    <div class="card-header-custom">
+                        <div>
+                            <input type="radio" name="strategy" value="rsi_pure" class="radio-custom"
+                                onchange="selectStrategy('rsi_pure')">
+                            <span class="ms-2">🎯 RSI Puro</span>
+                        </div>
+                        <span class="badge bg-warning text-dark">RSI<30< /span>
+                    </div>
+                    <div class="balance-large" id="balance-rsi_pure">$100.00</div>
+                    <div class="mt-2">
+                        Lucro: <span id="profit-rsi_pure" class="profit-positive">+0.00%</span>
+                    </div>
+                    <div class="trade-list mt-3" id="trades-rsi_pure">
+                        <div class="text-muted">Aguardando operações...</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Live Mode Control -->
+        <div class="row">
+            <div class="col-12">
+                <div class="card text-center">
+                    <div class="card-header-custom justify-content-center">
+                        <span class="live-indicator" id="live-indicator"></span>
+                        <span>MODO DE EXECUÇÃO REAL</span>
+                        <label class="switch-large">
+                            <input type="checkbox" id="live-toggle" onchange="toggleLive()">
+                        </label>
+                    </div>
+                    <p class="text-muted mb-0">
+                        ⚠️ Quando ativado, a estratégia selecionada executará ordens de verdade na Binance
+                    </p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        async function updateDashboard() {
+            try {
+                const response = await fetch('/api/status');
+                const data = await response.json();
+
+                // Atualiza preço e tempo
+                document.getElementById('current-price').innerText = data.current_price.toFixed(2);
+                document.getElementById('last-update').innerText = data.last_update;
+
+                // Atualiza saldo real
+                document.getElementById('real-balance').innerText = data.real_balance.toFixed(2);
+
+                // Atualiza cada estratégia
+                for (const [key, strategy] of Object.entries(data.strategies)) {
+                    const balance = strategy.balance.toFixed(2);
+                    const profit = ((strategy.balance - 100) / 100) * 100;
+
+                    document.getElementById(`balance-${key}`).innerText = `$${balance}`;
+
+                    const profitEl = document.getElementById(`profit-${key}`);
+                    profitEl.innerText = `${profit >= 0 ? '+' : ''}${profit.toFixed(2)}%`;
+                    profitEl.className = profit >= 0 ? 'profit-positive' : 'profit-negative';
+
+                    // Atualiza trades
+                    const tradesContainer = document.getElementById(`trades-${key}`);
+                    if (strategy.trades.length > 0) {
+                        const lastTrades = strategy.trades.slice(-5).reverse();
+                        tradesContainer.innerHTML = lastTrades.map(trade => `
+                            <div class="trade-item">
+                                <strong>${trade.type}</strong> @ $${trade.price.toFixed(2)}
+                                ${trade.profit ? `| ${trade.profit >= 0 ? '+' : ''}$${trade.profit.toFixed(2)}` : ''}
+                                <span class="badge bg-secondary">${trade.mode}</span>
+                            </div>
+                        `).join('');
+                    }
+                }
+
+                // Marca estratégia selecionada
+                document.querySelectorAll('.strategy-card').forEach(card => card.classList.remove('selected'));
+                document.getElementById(`card-${data.selected_strategy}`).classList.add('selected');
+                document.querySelector(`input[value="${data.selected_strategy}"]`).checked = true;
+
+                // Atualiza indicador live
+                const liveIndicator = document.getElementById('live-indicator');
+                liveIndicator.className = data.is_live ? 'live-indicator active' : 'live-indicator inactive';
+                document.getElementById('live-toggle').checked = data.is_live;
+
+            } catch (error) {
+                console.error('Erro ao atualizar:', error);
+            }
+        }
+
+        async function selectStrategy(strategy) {
+            try {
+                await fetch('/api/select_strategy', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ strategy })
+                });
+                updateDashboard();
+            } catch (error) {
+                console.error('Erro ao selecionar estratégia:', error);
+            }
+        }
+
+        async function toggleLive() {
+            const isLive = document.getElementById('live-toggle').checked;
+            try {
+                const response = await fetch('/api/toggle_live', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ is_live: isLive })
+                });
+
+                if (!response.ok) {
+                    alert('Erro: Chaves API não configuradas!');
+                    document.getElementById('live-toggle').checked = false;
+                }
+
+                updateDashboard();
+            } catch (error) {
+                console.error('Erro ao alternar modo:', error);
+            }
+        }
+
+        // Atualiza a cada 2 segundos
+        setInterval(updateDashboard, 2000);
+        updateDashboard();
+    </script>
+</body>
+
+</html>
