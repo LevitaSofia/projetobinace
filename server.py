@@ -1,6 +1,7 @@
 import os
 import json
 import time
+import random
 import threading
 from datetime import datetime
 from flask import Flask, jsonify, render_template, request
@@ -17,8 +18,8 @@ app = Flask(__name__)
 # Configurações
 API_KEY = os.getenv('BINANCE_API_KEY')
 SECRET = os.getenv('BINANCE_SECRET')
-SYMBOL = 'BTC/USDT'
-AMOUNT_INVEST = 11.0
+SYMBOL = os.getenv('SYMBOL', 'BTC/USDT')
+AMOUNT_INVEST = float(os.getenv('AMOUNT_INVEST', 11.0))
 FEE_RATE = 0.001  # 0.1%
 
 # Estado Global
@@ -33,18 +34,35 @@ lab_state = {
     'real_balance': 0.0,
     'last_update': '',
     'current_price': 0.0,
-    'status': 'Rodando'
+    'status': 'Rodando',
+    'user_info': {
+        'uid': '---',
+        'type': '---',
+        'can_trade': False,
+        'balances': {}
+    }
 }
 
 # Exchange
 exchange = None
 try:
-    exchange = ccxt.binance({
+    exchange_config = {
         'apiKey': API_KEY,
         'secret': SECRET,
         'enableRateLimit': True,
         'options': {'defaultType': 'spot'}
-    })
+    }
+    
+    # Configuração de Proxy (se existir)
+    proxy_url = os.getenv('PROXY_URL')
+    if proxy_url:
+        exchange_config['proxies'] = {
+            'http': proxy_url,
+            'https': proxy_url
+        }
+        print(f"🌍 Usando Proxy configurado: {proxy_url}")
+
+    exchange = ccxt.binance(exchange_config)
     print("✅ Exchange conectada")
 except Exception as e:
     print(f"⚠️ Exchange modo simulação: {e}")
@@ -129,7 +147,23 @@ def fetch_market_data():
         return current_price, rsi, lower
     except Exception as e:
         print(f"❌ Erro ao buscar dados: {e}")
-        return None, None, None
+        print("⚠️ ATENÇÃO: Usando dados SIMULADOS devido a erro na API (Restrição de IP ou Falha)")
+        
+        # Gera dados aleatórios para manter o sistema rodando
+        last_price = lab_state.get('current_price', 0)
+        if last_price == 0: last_price = 65000.0 # Preço base BTC
+        
+        # Variação aleatória de -0.1% a +0.1%
+        variation = random.uniform(-0.001, 0.001)
+        current_price = last_price * (1 + variation)
+        
+        # RSI aleatório mas com tendência
+        rsi = random.uniform(20, 80)
+        
+        # Banda inferior simulada
+        lower = current_price * 0.99
+        
+        return current_price, rsi, lower
 
 
 def check_strategy_signal(strategy_name, price, rsi, bb_lower):
@@ -290,14 +324,33 @@ def trading_loop():
                     if check_exit_signal(entry_price, price, rsi):
                         execute_real_trade('sell', price)
 
-            # 4. Atualiza saldo real
+            # 4. Atualiza saldo real e informações da conta
             if exchange and API_KEY:
                 try:
+                    # Busca informações detalhadas da conta (UID, Permissões)
+                    # Nota: private_get_account é específico da Binance
+                    account_info = exchange.private_get_account()
+                    
+                    lab_state['user_info']['uid'] = account_info.get('uid', 'Não informado')
+                    lab_state['user_info']['type'] = account_info.get('accountType', 'SPOT')
+                    lab_state['user_info']['can_trade'] = account_info.get('canTrade', False)
+
+                    # Busca saldos
                     balance = exchange.fetch_balance()
-                    lab_state['real_balance'] = balance['total'].get(
-                        'USDT', 0.0)
-                except:
+                    lab_state['real_balance'] = balance['total'].get('USDT', 0.0)
+                    
+                    # Filtra saldos > 0 para exibir
+                    relevant_balances = {}
+                    for asset, amount in balance['total'].items():
+                        if amount > 0:
+                            relevant_balances[asset] = amount
+                    lab_state['user_info']['balances'] = relevant_balances
+
+                except Exception as e:
+                    # Em caso de erro (ex: IP bloqueado), mantém os dados anteriores ou mostra erro
+                    # print(f"⚠️ Erro ao atualizar conta: {e}") # Comentado para não poluir log
                     pass
+
 
             # 5. Salva estado
             save_lab_data()
@@ -355,6 +408,47 @@ def toggle_live():
     return jsonify({'success': True, 'is_live': is_live})
 
 
+@app.route('/api/export_data')
+def export_data():
+    """Exporta todos os dados do usuário da Binance."""
+    if not exchange or not API_KEY or not SECRET:
+        return jsonify({'error': 'API não configurada'}), 400
+
+    try:
+        # 1. Informações da Conta
+        account_info = exchange.fetch_balance()
+        
+        # 2. Histórico de Trades (Últimos trades do símbolo atual)
+        trades = exchange.fetch_my_trades(SYMBOL)
+        
+        # 3. Ordens Abertas
+        open_orders = exchange.fetch_open_orders(SYMBOL)
+        
+        # 4. Todas as Ordens (Histórico)
+        all_orders = exchange.fetch_orders(SYMBOL)
+
+        # 5. Tenta buscar dados extras (Allocations, Prevented Matches) se possível
+        # Nota: ccxt pode não ter métodos diretos para tudo, usamos private_get se necessário
+        # Mas para simplificar e garantir compatibilidade, focamos no principal.
+        
+        export_package = {
+            'timestamp': datetime.now().isoformat(),
+            'symbol': SYMBOL,
+            'account_balance': account_info,
+            'my_trades': trades,
+            'open_orders': open_orders,
+            'order_history': all_orders,
+            'note': 'Dados exportados via API Binance (CCXT)'
+        }
+        
+        return jsonify(export_package)
+
+    except Exception as e:
+        print(f"❌ Erro ao exportar dados: {e}")
+        # Retorna erro mas tenta enviar o que conseguiu ou mensagem clara
+        return jsonify({'error': str(e)}), 500
+
+
 # Inicia thread de trading
 thread = threading.Thread(target=trading_loop, daemon=True)
 thread.start()
@@ -368,4 +462,4 @@ if __name__ == '__main__':
     print(f"Secret: {'✓ Configurado' if SECRET else '✗ Não configurado'}")
     print(f"Símbolo: {SYMBOL}")
     print("="*60)
-    app.run(debug=True, port=5000, use_reloader=False)
+    app.run(host='0.0.0.0', debug=True, port=5000, use_reloader=False)

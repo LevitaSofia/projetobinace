@@ -1,6 +1,9 @@
 import os
 import sys
 import subprocess
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # 1. Instalação automática do ccxt se não existir
 try:
@@ -11,8 +14,8 @@ except ImportError:
     import ccxt
 
 # --- SUAS CHAVES (Preenchidas automaticamente com base no que você me passou) ---
-API_KEY = 'ahIHqdZbvgKAMGrOi57LaqNu6mUKbIMTB6ZqK79I0M5tofP3yrO5guJW2uCYYHtr'
-SECRET  = 'qUMK1fyhLLOWzRMDon7xrAxNDYwoboKsbKkZEHNfhMLr4a0zAZxDjzI3LNFD9E00'
+API_KEY = os.getenv('BINANCE_API_KEY')
+SECRET  = os.getenv('BINANCE_SECRET')
 
 def testar_conexao():
     print("\n" + "="*50)

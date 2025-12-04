@@ -134,8 +134,24 @@
             <div class="col-12">
                 <div class="card">
                     <div class="card-header-custom">
-                        <span><i class="fas fa-wallet"></i> Saldo Real Binance (Validação)</span>
-                        <span>USDT: <span class="balance-large" id="real-balance">0.00</span></span>
+                        <span><i class="fas fa-user-circle"></i> Minha Conta Binance</span>
+                        <span class="badge bg-info text-dark" id="account-type">CARREGANDO...</span>
+                    </div>
+                    <div class="row align-items-center">
+                        <div class="col-md-4 border-end border-secondary">
+                            <h5 class="text-muted mb-1">UID (Identificador)</h5>
+                            <h3 class="text-white" id="user-uid">---</h3>
+                            <div class="mt-2">
+                                <small class="text-muted">Permissão de Trade:</small>
+                                <span id="trade-status" class="badge bg-secondary">Verificando...</span>
+                            </div>
+                        </div>
+                        <div class="col-md-8">
+                            <h5 class="text-muted mb-3">💰 Meus Saldos (Carteira Spot)</h5>
+                            <div id="balance-list" class="d-flex flex-wrap gap-3">
+                                <span class="text-muted">Carregando saldos...</span>
+                            </div>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -224,9 +240,58 @@
                 </div>
             </div>
         </div>
+
+        <!-- Export Data -->
+        <div class="row mb-4">
+            <div class="col-12 text-center">
+                <button class="btn btn-primary btn-lg" onclick="exportData()">
+                    <i class="fas fa-download"></i> Exportar Meus Dados (JSON)
+                </button>
+                <p class="text-muted mt-2 small">
+                    Baixa histórico de trades, ordens, saldo e informações da conta conforme documentação.
+                </p>
+            </div>
+        </div>
     </div>
 
     <script>
+        async function exportData() {
+            try {
+                const btn = document.querySelector('button[onclick="exportData()"]');
+                const originalText = btn.innerHTML;
+                btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Baixando...';
+                btn.disabled = true;
+
+                const response = await fetch('/api/export_data');
+                if (!response.ok) {
+                    const err = await response.json();
+                    throw new Error(err.error || 'Erro desconhecido');
+                }
+                
+                const data = await response.json();
+                
+                // Cria blob e link para download
+                const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+                const url = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `binance_data_${new Date().toISOString().slice(0,10)}.json`;
+                document.body.appendChild(a);
+                a.click();
+                window.URL.revokeObjectURL(url);
+                document.body.removeChild(a);
+                
+                alert('✅ Dados exportados com sucesso!');
+            } catch (error) {
+                console.error('Erro ao exportar:', error);
+                alert('❌ Erro ao exportar dados: ' + error.message);
+            } finally {
+                const btn = document.querySelector('button[onclick="exportData()"]');
+                btn.innerHTML = '<i class="fas fa-download"></i> Exportar Meus Dados (JSON)';
+                btn.disabled = false;
+            }
+        }
+
         async function updateDashboard() {
             try {
                 const response = await fetch('/api/status');
@@ -236,8 +301,35 @@
                 document.getElementById('current-price').innerText = data.current_price.toFixed(2);
                 document.getElementById('last-update').innerText = data.last_update;
 
-                // Atualiza saldo real
-                document.getElementById('real-balance').innerText = data.real_balance.toFixed(2);
+                // --- Atualiza Informações da Conta ---
+                if (data.user_info) {
+                    document.getElementById('user-uid').innerText = data.user_info.uid;
+                    document.getElementById('account-type').innerText = data.user_info.type;
+                    
+                    const tradeStatus = document.getElementById('trade-status');
+                    if (data.user_info.can_trade) {
+                        tradeStatus.className = 'badge bg-success';
+                        tradeStatus.innerText = 'ATIVO ✅';
+                    } else {
+                        tradeStatus.className = 'badge bg-danger';
+                        tradeStatus.innerText = 'BLOQUEADO ❌';
+                    }
+
+                    // Lista de Saldos
+                    const balanceContainer = document.getElementById('balance-list');
+                    const balances = data.user_info.balances;
+                    
+                    if (Object.keys(balances).length > 0) {
+                        balanceContainer.innerHTML = Object.entries(balances).map(([asset, amount]) => `
+                            <div class="d-flex align-items-center bg-dark p-2 rounded border border-secondary">
+                                <div class="me-2 fw-bold text-warning">${asset}</div>
+                                <div class="fs-5">${parseFloat(amount).toFixed(8)}</div>
+                            </div>
+                        `).join('');
+                    } else {
+                        balanceContainer.innerHTML = '<span class="text-muted">Nenhum saldo encontrado ou erro de conexão.</span>';
+                    }
+                }
 
                 // Atualiza cada estratégia
                 for (const [key, strategy] of Object.entries(data.strategies)) {
