@@ -15,7 +15,7 @@
             --yellow: #fcd535;
             --green: #0ecb81;
             --red: #f6465d;
-            --text: #c9d1d9;
+            --text: #e6edf3;
         }
 
         body {
@@ -23,6 +23,10 @@
             color: var(--text);
             font-family: 'Inter', sans-serif;
             padding: 20px;
+        }
+
+        .text-muted {
+            color: #8b949e !important;
         }
 
         .card {
@@ -124,8 +128,40 @@
                 </h1>
                 <p class="text-center text-muted">
                     Testando 3 estratégias simultaneamente | Preço BTC: $<span id="current-price">0.00</span> |
-                    Atualizado: <span id="last-update">--:--:--</span>
+                    Atualizado: <span id="last-update">--:--:--</span> | Status: <span id="system-status" class="badge bg-secondary">---</span>
                 </p>
+            </div>
+        </div>
+
+        <!-- Master Control -->
+        <div class="row mb-4">
+            <div class="col-12">
+                <div class="card text-center border-warning">
+                    <div class="card-body">
+                        <h3 class="card-title mb-3">🎛️ Painel de Controle Mestre</h3>
+                        <div class="d-flex justify-content-center gap-4 align-items-center">
+                            
+                            <!-- Botão Ligar/Desligar -->
+                            <button id="btn-running" class="btn btn-secondary btn-lg px-5 py-3 fw-bold" onclick="toggleRunning()">
+                                <i class="fas fa-power-off"></i> INICIAR SISTEMA
+                            </button>
+
+                            <div class="vr bg-secondary"></div>
+
+                            <!-- Chave Modo Real -->
+                            <div class="d-flex flex-column align-items-center">
+                                <span class="mb-2 fw-bold text-danger">⚠️ MODO REAL (DINHEIRO)</span>
+                                <label class="switch-large">
+                                    <input type="checkbox" id="live-toggle" onchange="toggleLive()">
+                                </label>
+                            </div>
+
+                        </div>
+                        <p class="text-muted mt-3 mb-0">
+                            1. Selecione a estratégia abaixo. 2. Clique em INICIAR. 3. Quando confiar, ative o MODO REAL.
+                        </p>
+                    </div>
+                </div>
             </div>
         </div>
 
@@ -139,15 +175,15 @@
                     </div>
                     <div class="row align-items-center">
                         <div class="col-md-4 border-end border-secondary">
-                            <h5 class="text-muted mb-1">UID (Identificador)</h5>
-                            <h3 class="text-white" id="user-uid">---</h3>
+                            <h5 class="text-muted mb-1" style="color: #a0a0a0 !important;">UID (Identificador)</h5>
+                            <h3 class="text-white fw-bold" id="user-uid" style="text-shadow: 0 0 10px rgba(255,255,255,0.1);">---</h3>
                             <div class="mt-2">
                                 <small class="text-muted">Permissão de Trade:</small>
                                 <span id="trade-status" class="badge bg-secondary">Verificando...</span>
                             </div>
                         </div>
                         <div class="col-md-8">
-                            <h5 class="text-muted mb-3">💰 Meus Saldos (Carteira Spot)</h5>
+                            <h5 class="text-muted mb-3" style="color: #a0a0a0 !important;">💰 Meus Saldos (Carteira Spot)</h5>
                             <div id="balance-list" class="d-flex flex-wrap gap-3">
                                 <span class="text-muted">Carregando saldos...</span>
                             </div>
@@ -157,73 +193,81 @@
             </div>
         </div>
 
-        <!-- Strategies Cards -->
+        <!-- Active Strategy Monitor -->
         <div class="row">
-            <!-- Conservative -->
-            <div class="col-md-4">
-                <div class="card strategy-card" id="card-conservative">
+            <div class="col-md-6">
+                <div class="card h-100 border-info">
                     <div class="card-header-custom">
-                        <div>
-                            <input type="radio" name="strategy" value="conservative" class="radio-custom"
-                                onchange="selectStrategy('conservative')">
-                            <span class="ms-2">🛡️ Conservador</span>
+                        <span>🧠 Estratégia Ativa</span>
+                        <select class="form-select w-auto bg-dark text-white border-secondary" id="strategy-selector" onchange="selectStrategy(this.value)">
+                            <option value="conservative">🛡️ Conservador (RSI < 30 + BB)</option>
+                            <option value="aggressive">🚀 Agressivo (RSI < 45 + BB)</option>
+                            <option value="rsi_pure">🎯 RSI Puro (RSI < 30)</option>
+                        </select>
+                    </div>
+                    <div class="card-body text-center">
+                        <h2 class="display-4 mb-0 fw-bold" id="strategy-action">AGUARDANDO</h2>
+                        <p class="text-muted">Status Atual</p>
+                        <hr class="border-secondary">
+                        <div class="row mt-4">
+                            <div class="col-6 border-end border-secondary">
+                                <h5 class="text-muted">RSI (14)</h5>
+                                <h3 id="indicator-rsi" class="text-info fw-bold">--</h3>
+                            </div>
+                            <div class="col-6">
+                                <h5 class="text-muted">Preço vs BB Low</h5>
+                                <h3 id="indicator-price" class="text-warning fw-bold">--</h3>
+                                <small class="text-muted">Alvo: <span id="indicator-bb">--</span></small>
+                            </div>
                         </div>
-                        <span class="badge bg-secondary">RSI<30 + BB</span>
-                    </div>
-                    <div class="balance-large" id="balance-conservative">$100.00</div>
-                    <div class="mt-2">
-                        Lucro: <span id="profit-conservative" class="profit-positive">+0.00%</span>
-                    </div>
-                    <div class="trade-list mt-3" id="trades-conservative">
-                        <div class="text-muted">Aguardando operações...</div>
                     </div>
                 </div>
             </div>
 
-            <!-- Aggressive -->
-            <div class="col-md-4">
-                <div class="card strategy-card" id="card-aggressive">
+            <div class="col-md-6">
+                <div class="card h-100">
                     <div class="card-header-custom">
-                        <div>
-                            <input type="radio" name="strategy" value="aggressive" class="radio-custom"
-                                onchange="selectStrategy('aggressive')">
-                            <span class="ms-2">🚀 Agressivo</span>
+                        <span>📜 Log de Operações (Selecionada)</span>
+                        <span class="badge bg-secondary">Últimas 10</span>
+                    </div>
+                    <div class="trade-list" id="active-trades-list">
+                        <div class="text-center text-muted mt-5">
+                            <i class="fas fa-history fa-2x mb-3"></i><br>
+                            Nenhuma operação registrada ainda...
                         </div>
-                        <span class="badge bg-danger">RSI<45 + BB</span>
-                    </div>
-                    <div class="balance-large" id="balance-aggressive">$100.00</div>
-                    <div class="mt-2">
-                        Lucro: <span id="profit-aggressive" class="profit-positive">+0.00%</span>
-                    </div>
-                    <div class="trade-list mt-3" id="trades-aggressive">
-                        <div class="text-muted">Aguardando operações...</div>
-                    </div>
-                </div>
-            </div>
-
-            <!-- RSI Pure -->
-            <div class="col-md-4">
-                <div class="card strategy-card" id="card-rsi_pure">
-                    <div class="card-header-custom">
-                        <div>
-                            <input type="radio" name="strategy" value="rsi_pure" class="radio-custom"
-                                onchange="selectStrategy('rsi_pure')">
-                            <span class="ms-2">🎯 RSI Puro</span>
-                        </div>
-                        <span class="badge bg-warning text-dark">RSI<30< /span>
-                    </div>
-                    <div class="balance-large" id="balance-rsi_pure">$100.00</div>
-                    <div class="mt-2">
-                        Lucro: <span id="profit-rsi_pure" class="profit-positive">+0.00%</span>
-                    </div>
-                    <div class="trade-list mt-3" id="trades-rsi_pure">
-                        <div class="text-muted">Aguardando operações...</div>
                     </div>
                 </div>
             </div>
         </div>
 
-        <!-- Live Mode Control -->
+        <!-- Radar de Mercado -->
+        <div class="row mb-4">
+            <div class="col-12">
+                <div class="card">
+                    <div class="card-header-custom">
+                        <span>📡 Radar de Mercado (Tempo Real)</span>
+                    </div>
+                    <div class="card-body p-0">
+                        <table class="table table-dark table-striped mb-0 text-center">
+                            <thead>
+                                <tr>
+                                    <th>Moeda</th>
+                                    <th>Preço (BRL)</th>
+                                    <th>RSI</th>
+                                    <th>Status</th>
+                                </tr>
+                            </thead>
+                            <tbody id="market-overview-body">
+                                <tr><td colspan="4" class="text-muted py-3">Carregando dados do mercado...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Live Mode Control (REMOVIDO - MOVIDO PARA O TOPO) -->
+        <!-- 
         <div class="row">
             <div class="col-12">
                 <div class="card text-center">
@@ -240,6 +284,7 @@
                 </div>
             </div>
         </div>
+        -->
 
         <!-- Export Data -->
         <div class="row mb-4">
@@ -300,6 +345,17 @@
                 // Atualiza preço e tempo
                 document.getElementById('current-price').innerText = data.current_price.toFixed(2);
                 document.getElementById('last-update').innerText = data.last_update;
+                document.getElementById('system-status').innerText = data.status;
+
+                // Atualiza Botão Running
+                const btnRunning = document.getElementById('btn-running');
+                if (data.running) {
+                    btnRunning.className = 'btn btn-success btn-lg px-5 py-3 fw-bold';
+                    btnRunning.innerHTML = '<i class="fas fa-pause"></i> PAUSAR SISTEMA';
+                } else {
+                    btnRunning.className = 'btn btn-secondary btn-lg px-5 py-3 fw-bold';
+                    btnRunning.innerHTML = '<i class="fas fa-play"></i> INICIAR SISTEMA';
+                }
 
                 // --- Atualiza Informações da Conta ---
                 if (data.user_info) {
@@ -323,7 +379,7 @@
                         balanceContainer.innerHTML = Object.entries(balances).map(([asset, amount]) => `
                             <div class="d-flex align-items-center bg-dark p-2 rounded border border-secondary">
                                 <div class="me-2 fw-bold text-warning">${asset}</div>
-                                <div class="fs-5">${parseFloat(amount).toFixed(8)}</div>
+                                <div class="fs-5 text-white">${parseFloat(amount).toFixed(8)}</div>
                             </div>
                         `).join('');
                     } else {
@@ -331,43 +387,98 @@
                     }
                 }
 
-                // Atualiza cada estratégia
-                for (const [key, strategy] of Object.entries(data.strategies)) {
-                    const balance = strategy.balance.toFixed(2);
-                    const profit = ((strategy.balance - 100) / 100) * 100;
-
-                    document.getElementById(`balance-${key}`).innerText = `$${balance}`;
-
-                    const profitEl = document.getElementById(`profit-${key}`);
-                    profitEl.innerText = `${profit >= 0 ? '+' : ''}${profit.toFixed(2)}%`;
-                    profitEl.className = profit >= 0 ? 'profit-positive' : 'profit-negative';
-
-                    // Atualiza trades
-                    const tradesContainer = document.getElementById(`trades-${key}`);
-                    if (strategy.trades.length > 0) {
-                        const lastTrades = strategy.trades.slice(-5).reverse();
-                        tradesContainer.innerHTML = lastTrades.map(trade => `
-                            <div class="trade-item">
-                                <strong>${trade.type}</strong> @ $${trade.price.toFixed(2)}
-                                ${trade.profit ? `| ${trade.profit >= 0 ? '+' : ''}$${trade.profit.toFixed(2)}` : ''}
-                                <span class="badge bg-secondary">${trade.mode}</span>
-                            </div>
-                        `).join('');
-                    }
+                // --- Atualiza Dashboard da Estratégia Ativa ---
+                const selectedKey = data.selected_strategy;
+                const activeStrategy = data.strategies[selectedKey];
+                
+                // Atualiza Seletor (apenas se não estiver focado para não atrapalhar)
+                const selector = document.getElementById('strategy-selector');
+                if (document.activeElement !== selector) {
+                    selector.value = selectedKey;
                 }
 
-                // Marca estratégia selecionada
-                document.querySelectorAll('.strategy-card').forEach(card => card.classList.remove('selected'));
-                document.getElementById(`card-${data.selected_strategy}`).classList.add('selected');
-                document.querySelector(`input[value="${data.selected_strategy}"]`).checked = true;
+                // Atualiza Indicadores
+                if (data.indicators) {
+                    document.getElementById('indicator-rsi').innerText = data.indicators.rsi.toFixed(2);
+                    // Mostra o Símbolo junto com o preço (Ex: BNB/BRL: $4814.00)
+                    document.getElementById('indicator-price').innerText = `${data.current_symbol}: $${data.current_price.toFixed(2)}`;
+                    document.getElementById('indicator-bb').innerText = `$${data.indicators.bb_lower.toFixed(2)}`;
+                }
+
+                // --- Atualiza Radar de Mercado ---
+                const marketBody = document.getElementById('market-overview-body');
+                if (data.market_overview && marketBody) {
+                    marketBody.innerHTML = Object.entries(data.market_overview).map(([symbol, info]) => {
+                        let rsiClass = info.rsi < 30 ? 'text-success fw-bold' : (info.rsi > 70 ? 'text-danger' : 'text-warning');
+                        let status = info.rsi < 30 ? 'Oportunidade? 🤔' : 'Aguardando...';
+                        
+                        return `
+                            <tr>
+                                <td class="fw-bold text-white">${symbol}</td>
+                                <td class="text-white">R$ ${info.price.toFixed(2)}</td>
+                                <td class="${rsiClass}">${info.rsi.toFixed(1)}</td>
+                                <td class="text-muted small">${status}</td>
+                            </tr>
+                        `;
+                    }).join('');
+                }
+
+                // Atualiza Ação/Status
+                const actionEl = document.getElementById('strategy-action');
+                if (activeStrategy.position) {
+                    actionEl.innerText = "POSICIONADO";
+                    actionEl.className = "display-4 mb-0 fw-bold text-success";
+                } else {
+                    actionEl.innerText = "AGUARDANDO";
+                    actionEl.className = "display-4 mb-0 fw-bold text-muted";
+                }
+
+                // Atualiza Log de Trades da Estratégia Ativa
+                const tradesContainer = document.getElementById('active-trades-list');
+                if (activeStrategy.trades.length > 0) {
+                    const lastTrades = activeStrategy.trades.slice().reverse(); // Mostra todos ou limite
+                    tradesContainer.innerHTML = lastTrades.map(trade => `
+                        <div class="trade-item d-flex justify-content-between align-items-center">
+                            <div>
+                                <span class="badge ${trade.type.includes('BUY') ? 'bg-success' : 'bg-danger'} me-2">${trade.type}</span>
+                                <span class="text-white fw-bold">$${trade.price.toFixed(2)}</span>
+                            </div>
+                            <div class="text-end">
+                                <small class="d-block text-muted">${trade.time}</small>
+                                ${trade.profit_pct ? `<small class="${trade.profit_pct >= 0 ? 'text-success' : 'text-danger'}">${trade.profit_pct >= 0 ? '+' : ''}${trade.profit_pct.toFixed(2)}%</small>` : ''}
+                            </div>
+                        </div>
+                    `).join('');
+                } else {
+                    tradesContainer.innerHTML = `
+                        <div class="text-center text-muted mt-5">
+                            <i class="fas fa-history fa-2x mb-3"></i><br>
+                            Nenhuma operação registrada para <strong>${activeStrategy.name}</strong>
+                        </div>
+                    `;
+                }
 
                 // Atualiza indicador live
-                const liveIndicator = document.getElementById('live-indicator');
-                liveIndicator.className = data.is_live ? 'live-indicator active' : 'live-indicator inactive';
                 document.getElementById('live-toggle').checked = data.is_live;
 
             } catch (error) {
                 console.error('Erro ao atualizar:', error);
+            }
+        }
+
+        async function toggleRunning() {
+            const btn = document.getElementById('btn-running');
+            const isRunning = btn.classList.contains('btn-success'); // Se verde, está rodando
+            
+            try {
+                await fetch('/api/toggle_running', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ running: !isRunning })
+                });
+                updateDashboard();
+            } catch (error) {
+                console.error('Erro ao alternar running:', error);
             }
         }
 

@@ -9,6 +9,11 @@ from dotenv import load_dotenv
 import ccxt
 import pandas as pd
 import numpy as np
+import requests
+import asyncio
+from openai import OpenAI
+from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
 
 # Carrega variáveis de ambiente
 load_dotenv()
@@ -18,9 +23,28 @@ app = Flask(__name__)
 # Configurações
 API_KEY = os.getenv('BINANCE_API_KEY')
 SECRET = os.getenv('BINANCE_SECRET')
+TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
+TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
+OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
+
+if not API_KEY or API_KEY == 'sua_api_key_aqui':
+    print("\n" + "="*50)
+    print("❌ AVISO: CHAVES DE API NÃO ENCONTRADAS")
+    print("👉 Edite o arquivo .env e coloque suas chaves da Binance")
+    print("="*50 + "\n")
+
 SYMBOL = os.getenv('SYMBOL', 'BTC/USDT')
 AMOUNT_INVEST = float(os.getenv('AMOUNT_INVEST', 11.0))
 FEE_RATE = 0.001  # 0.1%
+
+# Configuração OpenAI
+openai_client = None
+if OPENAI_API_KEY and OPENAI_API_KEY != 'your_openai_api_key_here':
+    try:
+        openai_client = OpenAI(api_key=OPENAI_API_KEY)
+        print("🧠 OpenAI (GPT) Configurado")
+    except Exception as e:
+        print(f"⚠️ Erro ao configurar OpenAI: {e}")
 
 # Estado Global
 lab_state = {
@@ -31,10 +55,17 @@ lab_state = {
     },
     'selected_strategy': 'conservative',
     'is_live': False,
+    'running': False,  # Controle Mestre (ON/OFF)
     'real_balance': 0.0,
     'last_update': '',
     'current_price': 0.0,
-    'status': 'Rodando',
+    'current_symbol': '---', # Símbolo atual sendo analisado
+    'status': 'Parado', # Status inicial
+    'market_overview': {}, # Radar de Mercado (Todas as moedas)
+    'indicators': { # Novos indicadores para o frontend
+        'rsi': 0.0,
+        'bb_lower': 0.0
+    },
     'user_info': {
         'uid': '---',
         'type': '---',
@@ -50,7 +81,11 @@ try:
         'apiKey': API_KEY,
         'secret': SECRET,
         'enableRateLimit': True,
-        'options': {'defaultType': 'spot'}
+        'options': {
+            'defaultType': 'spot',
+            'adjustForTimeDifference': True,
+            'recvWindow': 10000
+        }
     }
     
     # Configuração de Proxy (se existir)
@@ -63,6 +98,12 @@ try:
         print(f"🌍 Usando Proxy configurado: {proxy_url}")
 
     exchange = ccxt.binance(exchange_config)
+    
+    # Força sincronização de tempo
+    print("⏳ Sincronizando relógio com a Binance...")
+    diff = exchange.load_time_difference()
+    print(f"✅ Relógio sincronizado. Diferença: {diff}ms")
+    
     print("✅ Exchange conectada")
 except Exception as e:
     print(f"⚠️ Exchange modo simulação: {e}")
@@ -78,6 +119,7 @@ def load_lab_data():
             lab_state['selected_strategy'] = data.get(
                 'selected_strategy', 'conservative')
             lab_state['is_live'] = data.get('is_live', False)
+            lab_state['running'] = data.get('running', False)
             print("📂 Dados do laboratório carregados")
     except FileNotFoundError:
         print("📝 Criando novo laboratório")
@@ -90,6 +132,7 @@ def save_lab_data():
         'strategies': lab_state['strategies'],
         'selected_strategy': lab_state['selected_strategy'],
         'is_live': lab_state['is_live'],
+        'running': lab_state['running'],
         'last_save': datetime.now().isoformat()
     }
     with open('lab_data.json', 'w') as f:
@@ -130,14 +173,85 @@ def calculate_bollinger(prices, period=20):
     return upper, sma, lower
 
 
-def fetch_market_data():
+# --- INTEGRAÇÃO TELEGRAM & GPT ---
+
+def send_telegram_message(message):
+    """Envia mensagem para o Telegram."""
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID or TELEGRAM_TOKEN == 'your_telegram_token_here':
+        print("⚠️ Telegram não configurado. Mensagem não enviada.")
+        return
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": message,
+        "parse_mode": "Markdown"
+    }
+    
+    try:
+        response = requests.post(url, json=payload, timeout=10)
+        if response.status_code == 200:
+            print("📨 Mensagem Telegram enviada com sucesso!")
+        else:
+            print(f"❌ Erro Telegram: {response.text}")
+    except Exception as e:
+        print(f"❌ Erro ao enviar Telegram: {e}")
+
+def analyze_market_with_gpt(symbol, price, rsi, bb_lower, action_type):
+    """Usa GPT para analisar o contexto do trade."""
+    if not openai_client:
+        return "🤖 IA não configurada."
+
+    prompt = f"""
+    Você é um analista de trading sênior.
+    Ação: {action_type} em {symbol}
+    Preço Atual: {price}
+    RSI (14): {rsi:.2f}
+    Bandas de Bollinger (Lower): {bb_lower:.2f}
+    
+    Analise brevemente (máximo 2 frases) se esta operação faz sentido técnico com base no RSI e Bollinger.
+    Seja direto e use emojis.
+    """
+
+    try:
+        response = openai_client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": "Você é um assistente de trading cripto conciso."},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=100
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        print(f"❌ Erro GPT: {e}")
+        return "🤖 Erro na análise de IA."
+
+# ---------------------------------
+
+
+# Lista de moedas para monitorar
+WATCHLIST = [
+    'BTC/USDT', 
+    'ETH/USDT', 
+    'SOL/USDT', 
+    'BNB/USDT', 
+    'XRP/USDT', 
+    'ADA/USDT', 
+    'DOGE/USDT', 
+    'LINK/USDT', 
+    'LTC/USDT', 
+    'DOT/USDT'
+]
+
+def fetch_market_data(symbol):
     """Busca dados de mercado para análise."""
     try:
         if not exchange:
             return None, None, None
 
         # Busca últimas 100 velas de 5 minutos
-        ohlcv = exchange.fetch_ohlcv(SYMBOL, '5m', limit=100)
+        ohlcv = exchange.fetch_ohlcv(symbol, '5m', limit=100)
         closes = [candle[4] for candle in ohlcv]
         current_price = closes[-1]
 
@@ -146,24 +260,8 @@ def fetch_market_data():
 
         return current_price, rsi, lower
     except Exception as e:
-        print(f"❌ Erro ao buscar dados: {e}")
-        print("⚠️ ATENÇÃO: Usando dados SIMULADOS devido a erro na API (Restrição de IP ou Falha)")
-        
-        # Gera dados aleatórios para manter o sistema rodando
-        last_price = lab_state.get('current_price', 0)
-        if last_price == 0: last_price = 65000.0 # Preço base BTC
-        
-        # Variação aleatória de -0.1% a +0.1%
-        variation = random.uniform(-0.001, 0.001)
-        current_price = last_price * (1 + variation)
-        
-        # RSI aleatório mas com tendência
-        rsi = random.uniform(20, 80)
-        
-        # Banda inferior simulada
-        lower = current_price * 0.99
-        
-        return current_price, rsi, lower
+        print(f"❌ Erro ao buscar dados ({symbol}): {e}")
+        return None, None, None
 
 
 def check_strategy_signal(strategy_name, price, rsi, bb_lower):
@@ -185,25 +283,33 @@ def check_exit_signal(entry_price, current_price, rsi):
     return profit_pct > 1.5 or profit_pct < -1.5 or rsi > 70
 
 
-def simulate_trade(strategy_key, action, price):
+def simulate_trade(strategy_key, action, price, symbol):
     """Executa trade simulado."""
     strategy = lab_state['strategies'][strategy_key]
 
     if action == 'buy' and strategy['position'] is None:
         qty = (AMOUNT_INVEST / price) * (1 - FEE_RATE)
         strategy['position'] = {
-            'entry_price': price, 'qty': qty, 'entry_time': datetime.now().isoformat()}
+            'entry_price': price, 'qty': qty, 'entry_time': datetime.now().isoformat(), 'symbol': symbol}
         strategy['balance'] -= AMOUNT_INVEST
 
         trade = {
             'time': datetime.now().strftime('%H:%M:%S'),
-            'type': 'BUY',
+            'type': f'BUY ({symbol})',
             'price': price,
             'qty': qty,
             'mode': 'SIM'
         }
         strategy['trades'].append(trade)
-        print(f"🔵 [{strategy['name']}] COMPRA SIM: {qty:.8f} @ ${price:.2f}")
+        print(f"🔵 [{strategy['name']}] COMPRA SIM: {qty:.8f} {symbol} @ ${price:.2f}")
+        
+        # Notificação Telegram + IA (Apenas para estratégia selecionada para não spammar)
+        if strategy_key == lab_state['selected_strategy']:
+            rsi = lab_state['indicators']['rsi']
+            bb_lower = lab_state['indicators']['bb_lower']
+            ai_analysis = analyze_market_with_gpt(symbol, price, rsi, bb_lower, "COMPRA SIMULADA")
+            msg = f"🔵 *SIMULAÇÃO DE COMPRA*\\n\\n🪙 Moeda: {symbol}\\n💰 Preço: {price:.2f}\\n📊 RSI: {rsi:.2f}\\n\\n🧠 *IA Diz:* {ai_analysis}"
+            send_telegram_message(msg)
 
     elif action == 'sell' and strategy['position'] is not None:
         pos = strategy['position']
@@ -215,7 +321,7 @@ def simulate_trade(strategy_key, action, price):
 
         trade = {
             'time': datetime.now().strftime('%H:%M:%S'),
-            'type': 'SELL',
+            'type': f'SELL ({symbol})',
             'price': price,
             'qty': pos['qty'],
             'profit': profit,
@@ -224,10 +330,18 @@ def simulate_trade(strategy_key, action, price):
         }
         strategy['trades'].append(trade)
         strategy['position'] = None
-        print(f"🟢 [{strategy['name']}] VENDA SIM: {pos['qty']:.8f} @ ${price:.2f} | Lucro: ${profit:.2f} ({profit_pct:+.2f}%)")
+        print(f"🟢 [{strategy['name']}] VENDA SIM: {pos['qty']:.8f} {symbol} @ ${price:.2f} | Lucro: ${profit:.2f} ({profit_pct:+.2f}%)")
+
+        # Notificação Telegram + IA
+        if strategy_key == lab_state['selected_strategy']:
+            rsi = lab_state['indicators']['rsi']
+            bb_lower = lab_state['indicators']['bb_lower']
+            ai_analysis = analyze_market_with_gpt(symbol, price, rsi, bb_lower, "VENDA SIMULADA")
+            msg = f"🟢 *SIMULAÇÃO DE VENDA*\\n\\n🪙 Moeda: {symbol}\\n💰 Preço: {price:.2f}\\n📈 Lucro: {profit_pct:.2f}%\\n\\n🧠 *IA Diz:* {ai_analysis}"
+            send_telegram_message(msg)
 
 
-def execute_real_trade(action, price):
+def execute_real_trade(action, price, symbol):
     """Executa trade REAL na Binance."""
     if not exchange or not API_KEY or not SECRET:
         print("⚠️ Modo real desabilitado: sem chaves API")
@@ -240,42 +354,64 @@ def execute_real_trade(action, price):
         if action == 'buy':
             # Ordem de compra REAL
             order = exchange.create_market_buy_order(
-                SYMBOL, AMOUNT_INVEST / price)
+                symbol, AMOUNT_INVEST / price)
 
             trade = {
                 'time': datetime.now().strftime('%H:%M:%S'),
-                'type': 'BUY REAL',
+                'type': f'BUY REAL ({symbol})',
                 'price': order['average'] or price,
                 'qty': order['filled'],
                 'order_id': order['id'],
                 'mode': 'REAL'
             }
             strategy['trades'].append(trade)
+            # Salva o símbolo na posição para saber o que vender depois
+            strategy['position'] = {
+                'entry_price': price, 'qty': order['filled'], 'entry_time': datetime.now().isoformat(), 'symbol': symbol}
+            
             print(
-                f"💰 [{strategy['name']}] COMPRA REAL: {order['filled']} @ ${order['average']:.2f}")
+                f"💰 [{strategy['name']}] COMPRA REAL: {order['filled']} {symbol} @ ${order['average']:.2f}")
+            
+            # Notificação Telegram + IA
+            rsi = lab_state['indicators']['rsi']
+            bb_lower = lab_state['indicators']['bb_lower']
+            ai_analysis = analyze_market_with_gpt(symbol, price, rsi, bb_lower, "COMPRA REAL")
+            msg = f"💰 *ORDEM DE COMPRA REAL*\\n\\n🪙 Moeda: {symbol}\\n💰 Preço: {price:.2f}\\n📊 RSI: {rsi:.2f}\\n\\n🧠 *IA Diz:* {ai_analysis}"
+            send_telegram_message(msg)
+            
             return True
 
         elif action == 'sell':
             # Busca posição aberta para saber quanto vender
             if strategy['position']:
                 qty = strategy['position']['qty']
-                order = exchange.create_market_sell_order(SYMBOL, qty)
+                order = exchange.create_market_sell_order(symbol, qty)
 
                 trade = {
                     'time': datetime.now().strftime('%H:%M:%S'),
-                    'type': 'SELL REAL',
+                    'type': f'SELL REAL ({symbol})',
                     'price': order['average'] or price,
                     'qty': order['filled'],
                     'order_id': order['id'],
                     'mode': 'REAL'
                 }
                 strategy['trades'].append(trade)
+                strategy['position'] = None # Limpa posição
                 print(
-                    f"💵 [{strategy['name']}] VENDA REAL: {order['filled']} @ ${order['average']:.2f}")
+                    f"💵 [{strategy['name']}] VENDA REAL: {order['filled']} {symbol} @ ${order['average']:.2f}")
+                
+                # Notificação Telegram + IA
+                rsi = lab_state['indicators']['rsi']
+                bb_lower = lab_state['indicators']['bb_lower']
+                ai_analysis = analyze_market_with_gpt(symbol, price, rsi, bb_lower, "VENDA REAL")
+                msg = f"💵 *ORDEM DE VENDA REAL*\\n\\n🪙 Moeda: {symbol}\\n💰 Preço: {price:.2f}\\n\\n🧠 *IA Diz:* {ai_analysis}"
+                send_telegram_message(msg)
+                
                 return True
 
     except Exception as e:
         print(f"❌ ERRO ORDEM REAL: {e}")
+        send_telegram_message(f"❌ *ERRO CRÍTICO NA EXECUÇÃO*\\n\\n{str(e)}")
         return False
 
 
@@ -286,45 +422,98 @@ def trading_loop():
 
     while True:
         try:
-            # 1. Busca dados de mercado
-            price, rsi, bb_lower = fetch_market_data()
-
-            if price is None:
-                time.sleep(10)
-                continue
-
-            lab_state['current_price'] = price
-            lab_state['last_update'] = datetime.now().strftime('%H:%M:%S')
-
-            # 2. Simulação: Testa todas as 3 estratégias
-            for strategy_key in lab_state['strategies'].keys():
-                strategy = lab_state['strategies'][strategy_key]
-
-                # Verifica sinal de COMPRA
-                if strategy['position'] is None:
-                    if check_strategy_signal(strategy_key, price, rsi, bb_lower):
-                        simulate_trade(strategy_key, 'buy', price)
-
-                # Verifica sinal de VENDA
-                elif strategy['position'] is not None:
-                    entry_price = strategy['position']['entry_price']
-                    if check_exit_signal(entry_price, price, rsi):
-                        simulate_trade(strategy_key, 'sell', price)
-
-            # 3. Modo Real: Executa APENAS a estratégia selecionada
+            # Define quais moedas vamos olhar nesta rodada
+            # Se já tivermos uma posição aberta (Real ou Sim), focamos SÓ nela
+            active_symbol = None
+            
+            # Verifica se tem posição real aberta
             if lab_state['is_live']:
                 selected = lab_state['selected_strategy']
-                strategy = lab_state['strategies'][selected]
+                if lab_state['strategies'][selected]['position']:
+                    active_symbol = lab_state['strategies'][selected]['position'].get('symbol', SYMBOL)
+            
+            # Se não tem posição real, verifica se tem simulação aberta (para não misturar)
+            if not active_symbol:
+                 for s_key in lab_state['strategies']:
+                     if lab_state['strategies'][s_key]['position']:
+                         active_symbol = lab_state['strategies'][s_key]['position'].get('symbol', SYMBOL)
+                         break
+            
+            target_coins = [active_symbol] if active_symbol else WATCHLIST
 
-                if strategy['position'] is None:
-                    if check_strategy_signal(selected, price, rsi, bb_lower):
-                        execute_real_trade('buy', price)
+            for current_symbol in target_coins:
+                # 1. Busca dados de mercado
+                price, rsi, bb_lower = fetch_market_data(current_symbol)
+
+                if price is not None:
+                    lab_state['current_price'] = price
+                    lab_state['current_symbol'] = current_symbol # Atualiza o símbolo na interface
+                    lab_state['last_update'] = datetime.now().strftime('%H:%M:%S')
+                    # Hack para mostrar qual moeda está sendo analisada no frontend (usando status)
+                    # lab_state['status'] = f'Analisando {current_symbol}...' 
+                    
+                    # Atualiza indicadores globais
+                    lab_state['indicators']['rsi'] = rsi
+                    lab_state['indicators']['bb_lower'] = bb_lower
+                    
+                    # Atualiza Radar de Mercado
+                    lab_state['market_overview'][current_symbol] = {
+                        'price': price,
+                        'rsi': rsi,
+                        'bb_lower': bb_lower,
+                        'last_update': datetime.now().strftime('%H:%M:%S')
+                    }
+
+                # 2. Lógica de Trading (Apenas se estiver RODANDO)
+                if lab_state['running']:
+                    lab_state['status'] = f'Rodando 🚀 | {current_symbol}'
+
+                    if price is not None:
+                        # LOG DE ANÁLISE
+                        current_balance = lab_state.get('real_balance', 0.0)
+                        print(f"🔎 {current_symbol}: RSI={rsi:.1f} | Preço=${price:.2f} | Saldo=${current_balance:.2f}")
+
+                        # 2.1 Simulação: Testa todas as 3 estratégias
+                        for strategy_key in lab_state['strategies'].keys():
+                            strategy = lab_state['strategies'][strategy_key]
+
+                            # Verifica sinal de COMPRA
+                            if strategy['position'] is None:
+                                if check_strategy_signal(strategy_key, price, rsi, bb_lower):
+                                    simulate_trade(strategy_key, 'buy', price, current_symbol)
+                                    break # Compra apenas uma moeda por vez para não zerar saldo simulado
+
+                            # Verifica sinal de VENDA
+                            elif strategy['position'] is not None:
+                                # Só vende se for a moeda certa
+                                pos_symbol = strategy['position'].get('symbol', SYMBOL)
+                                if pos_symbol == current_symbol:
+                                    entry_price = strategy['position']['entry_price']
+                                    if check_exit_signal(entry_price, price, rsi):
+                                        simulate_trade(strategy_key, 'sell', price, current_symbol)
+
+                        # 2.2 Modo Real: Executa APENAS a estratégia selecionada
+                        if lab_state['is_live']:
+                            selected = lab_state['selected_strategy']
+                            strategy = lab_state['strategies'][selected]
+
+                            if strategy['position'] is None:
+                                if check_strategy_signal(selected, price, rsi, bb_lower):
+                                    execute_real_trade('buy', price, current_symbol)
+                                    break # Sai do loop de moedas para não comprar mais de uma
+                            else:
+                                pos_symbol = strategy['position'].get('symbol', SYMBOL)
+                                if pos_symbol == current_symbol:
+                                    entry_price = strategy['position']['entry_price']
+                                    if check_exit_signal(entry_price, price, rsi):
+                                        execute_real_trade('sell', price, current_symbol)
                 else:
-                    entry_price = strategy['position']['entry_price']
-                    if check_exit_signal(entry_price, price, rsi):
-                        execute_real_trade('sell', price)
+                    lab_state['status'] = 'Em Standby (Monitorando...) zzz'
+                
+                # Pequena pausa entre moedas para não estourar limite da API
+                time.sleep(2)
 
-            # 4. Atualiza saldo real e informações da conta
+            # 3. Atualiza saldo real e informações da conta (SEMPRE, para o dashboard)
             if exchange and API_KEY:
                 try:
                     # Busca informações detalhadas da conta (UID, Permissões)
@@ -334,10 +523,20 @@ def trading_loop():
                     lab_state['user_info']['uid'] = account_info.get('uid', 'Não informado')
                     lab_state['user_info']['type'] = account_info.get('accountType', 'SPOT')
                     lab_state['user_info']['can_trade'] = account_info.get('canTrade', False)
+                    
+                    # Se estiver bloqueado, imprime aviso
+                    if not lab_state['user_info']['can_trade']:
+                         print(f"⚠️ CONTA BLOQUEADA PELA BINANCE. Resposta: {account_info.get('canTrade')}")
 
                     # Busca saldos
                     balance = exchange.fetch_balance()
-                    lab_state['real_balance'] = balance['total'].get('USDT', 0.0)
+                    
+                    # Tenta pegar saldo em USDT ou BRL
+                    usdt_balance = balance['total'].get('USDT', 0.0)
+                    brl_balance = balance['total'].get('BRL', 0.0)
+                    
+                    # Define o saldo principal baseado no que tiver mais valor
+                    lab_state['real_balance'] = usdt_balance if usdt_balance > brl_balance else brl_balance
                     
                     # Filtra saldos > 0 para exibir
                     relevant_balances = {}
@@ -348,14 +547,13 @@ def trading_loop():
 
                 except Exception as e:
                     # Em caso de erro (ex: IP bloqueado), mantém os dados anteriores ou mostra erro
-                    # print(f"⚠️ Erro ao atualizar conta: {e}") # Comentado para não poluir log
+                    # print(f"⚠️ Erro ao atualizar conta: {e}") # Comentado para não poluir log se for erro temporário
                     pass
 
-
-            # 5. Salva estado
+            # 4. Salva estado
             save_lab_data()
 
-            time.sleep(5)  # Aguarda 5 segundos
+            # time.sleep(5)  # Aguarda 5 segundos (Removido pois já tem sleep no loop de moedas)
 
         except Exception as e:
             print(f"❌ Erro no loop: {e}")
@@ -408,6 +606,19 @@ def toggle_live():
     return jsonify({'success': True, 'is_live': is_live})
 
 
+@app.route('/api/toggle_running', methods=['POST'])
+def toggle_running():
+    """Liga/Desliga o robô (Master Switch)."""
+    data = request.json
+    running = data.get('running', False)
+    
+    lab_state['running'] = running
+    save_lab_data()
+    
+    print(f"🤖 ROBÔ {'LIGADO' if running else 'DESLIGADO'}")
+    return jsonify({'success': True, 'running': running})
+
+
 @app.route('/api/export_data')
 def export_data():
     """Exporta todos os dados do usuário da Binance."""
@@ -415,9 +626,12 @@ def export_data():
         return jsonify({'error': 'API não configurada'}), 400
 
     try:
-        # 1. Informações da Conta
-        account_info = exchange.fetch_balance()
+        # 1. Informações da Conta (Saldo detalhado)
+        account_balance = exchange.fetch_balance()
         
+        # 1.1 Informações da Conta (Dados brutos da Binance - Permissões, Comissões, etc)
+        account_details = exchange.private_get_account()
+
         # 2. Histórico de Trades (Últimos trades do símbolo atual)
         trades = exchange.fetch_my_trades(SYMBOL)
         
@@ -426,15 +640,12 @@ def export_data():
         
         # 4. Todas as Ordens (Histórico)
         all_orders = exchange.fetch_orders(SYMBOL)
-
-        # 5. Tenta buscar dados extras (Allocations, Prevented Matches) se possível
-        # Nota: ccxt pode não ter métodos diretos para tudo, usamos private_get se necessário
-        # Mas para simplificar e garantir compatibilidade, focamos no principal.
         
         export_package = {
             'timestamp': datetime.now().isoformat(),
             'symbol': SYMBOL,
-            'account_balance': account_info,
+            'account_details_binance': account_details, # Dados brutos da conta
+            'account_balance': account_balance,
             'my_trades': trades,
             'open_orders': open_orders,
             'order_history': all_orders,
@@ -448,6 +659,147 @@ def export_data():
         # Retorna erro mas tenta enviar o que conseguiu ou mensagem clara
         return jsonify({'error': str(e)}), 500
 
+
+# --- TELEGRAM BOT LISTENER (COMANDOS) ---
+
+async def telegram_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "👋 Olá! Sou o Bot do Laboratório de Trading.\n\n"
+        "Comandos disponíveis:\n"
+        "/status - Ver preço e indicadores atuais\n"
+        "/saldo - Ver saldo da conta\n"
+        "/ajuda - Ver lista de comandos"
+    )
+
+async def telegram_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🤖 *Comandos do Bot:*\n\n"
+        "/status - Mostra o que o bot está analisando agora.\n"
+        "/saldo - Mostra seu saldo em BRL e USDT.\n"
+        "/start - Inicia o bot.",
+        parse_mode='Markdown'
+    )
+
+async def telegram_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        msg = "📊 *STATUS DO MERCADO*\n\n"
+        msg += f"🪙 *Moeda:* {lab_state['current_symbol']}\n"
+        msg += f"💰 *Preço:* ${lab_state['current_price']:.2f}\n"
+        msg += f"📉 *RSI:* {lab_state['indicators']['rsi']:.2f}\n"
+        msg += f"🛡️ *Bandas:* {lab_state['indicators']['bb_lower']:.2f}\n\n"
+        
+        msg += f"⚙️ *Configuração:*\n"
+        msg += f"Estratégia: {lab_state['selected_strategy']}\n"
+        msg += f"Modo Real: {'✅ ATIVADO' if lab_state['is_live'] else '❌ SIMULAÇÃO'}\n"
+        msg += f"Status: {lab_state['status']}"
+        
+        await update.message.reply_text(msg, parse_mode='Markdown')
+    except Exception as e:
+        await update.message.reply_text(f"❌ Erro ao buscar status: {str(e)}")
+
+async def telegram_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        balances = lab_state['user_info'].get('balances', {})
+        msg = "💰 *SEU SALDO*\n\n"
+        if not balances:
+            msg += "Nenhum saldo encontrado ou API desconectada."
+        else:
+            for coin, amount in balances.items():
+                msg += f"• *{coin}:* {amount:.4f}\n"
+        
+        await update.message.reply_text(msg, parse_mode='Markdown')
+    except Exception as e:
+        await update.message.reply_text(f"❌ Erro ao buscar saldo: {str(e)}")
+
+async def telegram_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Responde a mensagens de texto usando GPT com contexto do mercado."""
+    user_message = update.message.text
+    print(f"📩 Mensagem recebida de {update.effective_user.first_name}: {user_message}")
+    
+    if not openai_client:
+        await update.message.reply_text("🧠 IA não configurada no servidor.")
+        return
+
+    try:
+        # Envia "Digitando..."
+        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action='typing')
+        
+        # Constrói contexto do mercado atual
+        market_context = "DADOS ATUAIS DO MERCADO (Use isso para responder):\n"
+        if lab_state['market_overview']:
+            for symbol, data in lab_state['market_overview'].items():
+                market_context += f"- {symbol}: Preço=${data['price']:.2f} | RSI={data['rsi']:.1f} | BB_Lower=${data['bb_lower']:.2f}\n"
+        else:
+            market_context += "Nenhum dado de mercado coletado ainda.\n"
+            
+        market_context += f"\nSaldo do Usuário: {lab_state.get('real_balance', 0):.2f}\n"
+        market_context += f"Estratégia Ativa: {lab_state['selected_strategy']}\n"
+
+        system_prompt = (
+            "Você é um assistente de trading experiente e útil conectado a um bot em tempo real.\n"
+            "Você TEM acesso aos dados atuais do mercado fornecidos abaixo.\n"
+            "Use esses dados para responder perguntas sobre preços, tendências e se vale a pena comprar/vender.\n"
+            "Se o usuário perguntar algo fora do contexto de trading, responda educadamente que seu foco é cripto.\n"
+            "Responda de forma concisa, direta e use emojis.\n\n"
+            f"{market_context}"
+        )
+        
+        response = openai_client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_message}
+            ],
+            max_tokens=400
+        )
+        reply = response.choices[0].message.content.strip()
+        await update.message.reply_text(reply)
+    except Exception as e:
+        print(f"❌ Erro na IA: {e}")
+        await update.message.reply_text(f"❌ Erro na IA: {str(e)}")
+
+def run_telegram_bot():
+    """Inicia o bot do Telegram em modo de escuta (Polling)."""
+    if not TELEGRAM_TOKEN or TELEGRAM_TOKEN == 'your_telegram_token_here':
+        print("⚠️ Telegram Listener não iniciado (Token inválido)")
+        return
+
+    # Cria novo loop de eventos para esta thread
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    print("🤖 Iniciando Telegram Bot Listener...")
+    
+    try:
+        app_bot = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+        
+        # Tenta enviar mensagem de boas-vindas para confirmar conexão
+        if TELEGRAM_CHAT_ID:
+            try:
+                print(f"📨 Tentando enviar mensagem de teste para ID: {TELEGRAM_CHAT_ID}")
+                loop.run_until_complete(app_bot.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="🤖 *Bot Reiniciado!* Estou online e pronto para conversar.", parse_mode='Markdown'))
+                print("✅ Mensagem de teste enviada com sucesso!")
+            except Exception as e:
+                print(f"❌ Falha ao enviar mensagem de teste: {e}")
+
+        app_bot.add_handler(CommandHandler("start", telegram_start))
+        app_bot.add_handler(CommandHandler("ajuda", telegram_help))
+        app_bot.add_handler(CommandHandler("help", telegram_help))
+        app_bot.add_handler(CommandHandler("status", telegram_status))
+        app_bot.add_handler(CommandHandler("saldo", telegram_balance))
+        
+        # Handler para mensagens de texto (Chat com GPT)
+        app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, telegram_chat))
+        
+        # stop_signals=None é necessário quando roda em uma thread secundária
+        print("🤖 Telegram Bot ouvindo...")
+        app_bot.run_polling(stop_signals=None, close_loop=False)
+    except Exception as e:
+        print(f"❌ Erro fatal no Telegram Bot: {e}")
+
+# Inicia thread do Telegram Listener
+telegram_thread = threading.Thread(target=run_telegram_bot, daemon=True)
+telegram_thread.start()
 
 # Inicia thread de trading
 thread = threading.Thread(target=trading_loop, daemon=True)
