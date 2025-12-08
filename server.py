@@ -53,9 +53,9 @@ lab_state = {
         'aggressive': {'name': 'Agressivo 🚀', 'balance': 100.0, 'trades': [], 'position': None},
         'rsi_pure': {'name': 'RSI Puro 🎯', 'balance': 100.0, 'trades': [], 'position': None}
     },
-    'selected_strategy': 'conservative',
-    'is_live': False,
-    'running': False,  # Controle Mestre (ON/OFF)
+    'selected_strategy': 'aggressive',  # Agressivo compra com RSI < 45
+    'is_live': True,  # MODO REAL ATIVADO por padrão
+    'running': True,  # Controle Mestre (ON/OFF) - Inicia LIGADO
     'real_balance': 0.0,
     'last_update': '',
     'current_price': 0.0,
@@ -66,6 +66,7 @@ lab_state = {
         'rsi': 0.0,
         'bb_lower': 0.0
     },
+    'diagnostics': {},  # Diagnóstico por moeda (motivo de não comprar)
     'user_info': {
         'uid': '---',
         'type': '---',
@@ -230,19 +231,22 @@ def analyze_market_with_gpt(symbol, price, rsi, bb_lower, action_type):
 # ---------------------------------
 
 
-# Lista de moedas para monitorar
+# Lista de moedas para monitorar (ordenadas por preço aproximado - mais baratas primeiro)
 WATCHLIST = [
-    'BTC/USDT', 
-    'ETH/USDT', 
-    'SOL/USDT', 
-    'BNB/USDT', 
-    'XRP/USDT', 
-    'ADA/USDT', 
-    'DOGE/USDT', 
-    'LINK/USDT', 
-    'LTC/USDT', 
-    'DOT/USDT'
+    'XRP/USDT',    # ~$2
+    'ADA/USDT',    # ~$1
+    'DOGE/USDT',   # ~$0.40
+    'DOT/USDT',    # ~$8
+    'LINK/USDT',   # ~$25
+    'LTC/USDT',    # ~$100
+    'SOL/USDT',    # ~$200
+    'BNB/USDT',    # ~$700
+    'ETH/USDT',    # ~$4000
+    'BTC/USDT',    # ~$90000
 ]
+
+# Valor mínimo de ordem na Binance (em USDT)
+MIN_ORDER_VALUE = 11.0
 
 def fetch_market_data(symbol):
     """Busca dados de mercado para análise."""
@@ -273,6 +277,48 @@ def check_strategy_signal(strategy_name, price, rsi, bb_lower):
     elif strategy_name == 'rsi_pure':
         return rsi < 30
     return False
+
+
+def get_diagnostic(strategy_name, price, rsi, bb_lower, position=None):
+    """Gera diagnóstico legível explicando por que não está comprando/vendendo."""
+    
+    # Se tem posição aberta, calcula lucro
+    if position:
+        entry_price = position.get('entry_price', price)
+        profit_pct = ((price - entry_price) / entry_price) * 100
+        return f"✅ COMPRADO (Lucro: {profit_pct:+.2f}%)"
+    
+    # Verifica saldo primeiro
+    usdt_balance = lab_state.get('real_balance', 0.0)
+    if usdt_balance < MIN_ORDER_VALUE and lab_state.get('is_live', False):
+        return f"💸 SALDO BAIXO (${usdt_balance:.2f} < ${MIN_ORDER_VALUE})"
+    
+    # Analisa condições para cada estratégia
+    issues = []
+    
+    if strategy_name == 'conservative':
+        rsi_target = 30
+        if rsi >= rsi_target:
+            issues.append(f"RSI Alto (Atual: {rsi:.1f} / Alvo: <{rsi_target})")
+        if price >= bb_lower:
+            issues.append(f"Preço Acima da Banda (${price:.2f} > ${bb_lower:.2f})")
+            
+    elif strategy_name == 'aggressive':
+        rsi_target = 45
+        if rsi >= rsi_target:
+            issues.append(f"RSI Alto (Atual: {rsi:.1f} / Alvo: <{rsi_target})")
+        if price >= bb_lower:
+            issues.append(f"Preço Acima da Banda")
+            
+    elif strategy_name == 'rsi_pure':
+        rsi_target = 30
+        if rsi >= rsi_target:
+            issues.append(f"RSI Alto (Atual: {rsi:.1f} / Alvo: <{rsi_target})")
+    
+    if not issues:
+        return "🎯 PRONTO PARA COMPRAR!"
+    
+    return "⏳ " + " | ".join(issues)
 
 
 def check_exit_signal(entry_price, current_price, rsi):
@@ -352,9 +398,25 @@ def execute_real_trade(action, price, symbol):
         strategy = lab_state['strategies'][strategy_key]
 
         if action == 'buy':
+            # VERIFICAÇÃO DE SALDO ANTES DE COMPRAR
+            usdt_balance = lab_state.get('real_balance', 0.0)
+            
+            if usdt_balance < MIN_ORDER_VALUE:
+                print(f"⚠️ Saldo insuficiente para compra real: ${usdt_balance:.2f} < ${MIN_ORDER_VALUE}")
+                send_telegram_message(f"⚠️ *SALDO INSUFICIENTE*\\n\\nSaldo: ${usdt_balance:.2f}\\nMínimo: ${MIN_ORDER_VALUE}\\n\\nDeposite mais USDT para operar no modo real.")
+                return False
+            
+            # Usa o valor disponível (máximo de AMOUNT_INVEST ou saldo disponível)
+            invest_amount = min(AMOUNT_INVEST, usdt_balance * 0.95)  # 95% para taxa
+            
+            if invest_amount < MIN_ORDER_VALUE:
+                print(f"⚠️ Valor de investimento muito baixo: ${invest_amount:.2f}")
+                return False
+            
+            qty = invest_amount / price
+            
             # Ordem de compra REAL
-            order = exchange.create_market_buy_order(
-                symbol, AMOUNT_INVEST / price)
+            order = exchange.create_market_buy_order(symbol, qty)
 
             trade = {
                 'time': datetime.now().strftime('%H:%M:%S'),
@@ -385,6 +447,25 @@ def execute_real_trade(action, price, symbol):
             # Busca posição aberta para saber quanto vender
             if strategy['position']:
                 qty = strategy['position']['qty']
+                
+                # Verifica se realmente temos a moeda na carteira antes de vender
+                try:
+                    balance = exchange.fetch_balance()
+                    coin = symbol.split('/')[0]  # Ex: 'XRP' de 'XRP/USDT'
+                    coin_balance = balance['free'].get(coin, 0)
+                    
+                    if coin_balance < qty * 0.99:  # 1% tolerância
+                        print(f"⚠️ Saldo real de {coin} insuficiente: {coin_balance:.8f} < {qty:.8f}")
+                        # Limpa posição fantasma
+                        strategy['position'] = None
+                        send_telegram_message(f"⚠️ *POSIÇÃO LIMPA*\\n\\nNão há {coin} na carteira para vender.\\nPosição simulada foi resetada.")
+                        return False
+                    
+                    # Usa o saldo real disponível
+                    qty = min(qty, coin_balance)
+                except Exception as e:
+                    print(f"⚠️ Erro ao verificar saldo: {e}")
+                
                 order = exchange.create_market_sell_order(symbol, qty)
 
                 trade = {
@@ -456,13 +537,21 @@ def trading_loop():
                     lab_state['indicators']['rsi'] = rsi
                     lab_state['indicators']['bb_lower'] = bb_lower
                     
-                    # Atualiza Radar de Mercado
+                    # Atualiza Radar de Mercado + Diagnóstico
+                    selected_strategy = lab_state['selected_strategy']
+                    strategy_position = lab_state['strategies'][selected_strategy]['position']
+                    diagnostic = get_diagnostic(selected_strategy, price, rsi, bb_lower, strategy_position)
+                    
                     lab_state['market_overview'][current_symbol] = {
                         'price': price,
                         'rsi': rsi,
                         'bb_lower': bb_lower,
+                        'diagnostic': diagnostic,
                         'last_update': datetime.now().strftime('%H:%M:%S')
                     }
+                    
+                    # Atualiza diagnósticos separados por moeda
+                    lab_state['diagnostics'][current_symbol] = diagnostic
 
                 # 2. Lógica de Trading (Apenas se estiver RODANDO)
                 if lab_state['running']:
@@ -566,10 +655,97 @@ def index():
     return render_template('index.html')
 
 
+@app.route('/charts')
+def charts_page():
+    """Página de gráficos das moedas."""
+    return render_template('charts.html')
+
+
 @app.route('/api/status')
 def get_status():
     """Retorna estado completo do laboratório."""
     return jsonify(lab_state)
+
+
+@app.route('/api/chart/<symbol>')
+def get_chart_data(symbol):
+    """Retorna dados de velas e indicadores para gráfico."""
+    try:
+        # Converte símbolo (BTC-USDT -> BTC/USDT)
+        symbol_clean = symbol.replace('-', '/')
+        
+        if not exchange:
+            return jsonify({'error': 'Exchange não conectada'}), 500
+        
+        # Busca últimas 100 velas de 5 minutos
+        ohlcv = exchange.fetch_ohlcv(symbol_clean, '5m', limit=100)
+        
+        # Formata dados
+        candles = []
+        closes = []
+        for candle in ohlcv:
+            candles.append({
+                'time': candle[0],  # timestamp
+                'open': candle[1],
+                'high': candle[2],
+                'low': candle[3],
+                'close': candle[4],
+                'volume': candle[5]
+            })
+            closes.append(candle[4])
+        
+        # Calcula indicadores
+        rsi = calculate_rsi(closes)
+        upper, sma, lower = calculate_bollinger(closes)
+        
+        # Calcula RSI histórico (últimos 50 pontos)
+        rsi_history = []
+        for i in range(50, len(closes)):
+            rsi_val = calculate_rsi(closes[:i+1])
+            rsi_history.append({
+                'time': ohlcv[i][0],
+                'value': rsi_val
+            })
+        
+        # Calcula Bollinger histórico
+        bb_history = []
+        for i in range(20, len(closes)):
+            u, m, l = calculate_bollinger(closes[:i+1])
+            bb_history.append({
+                'time': ohlcv[i][0],
+                'upper': u,
+                'middle': m,
+                'lower': l
+            })
+        
+        return jsonify({
+            'symbol': symbol_clean,
+            'candles': candles[-50:],  # Últimas 50 velas
+            'current_price': closes[-1],
+            'rsi': {
+                'current': rsi,
+                'history': rsi_history[-50:]
+            },
+            'bollinger': {
+                'upper': upper,
+                'middle': sma,
+                'lower': lower,
+                'history': bb_history[-50:]
+            },
+            'last_update': datetime.now().strftime('%H:%M:%S')
+        })
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/watchlist')
+def get_watchlist():
+    """Retorna lista de moedas monitoradas."""
+    return jsonify({
+        'watchlist': WATCHLIST,
+        'market_overview': lab_state.get('market_overview', {})
+    })
 
 
 @app.route('/api/select_strategy', methods=['POST'])
@@ -617,6 +793,68 @@ def toggle_running():
     
     print(f"🤖 ROBÔ {'LIGADO' if running else 'DESLIGADO'}")
     return jsonify({'success': True, 'running': running})
+
+
+@app.route('/api/force_buy', methods=['POST'])
+def force_buy():
+    """⚡ COMPRA FORÇADA - Ignora indicadores, testa conexão com Binance."""
+    if not exchange or not API_KEY or not SECRET:
+        return jsonify({'success': False, 'error': '❌ Chaves API não configuradas!'}), 400
+    
+    data = request.json
+    symbol = data.get('symbol', 'BTC/USDT')  # Padrão BTC/USDT
+    amount_usd = 11.0  # Valor mínimo para teste
+    
+    try:
+        print(f"{'='*60}")
+        print(f"⚡ COMPRA FORÇADA INICIADA - {symbol}")
+        print(f"{'='*60}")
+        
+        # Busca preço atual
+        ticker = exchange.fetch_ticker(symbol)
+        current_price = ticker['last']
+        
+        # Calcula quantidade
+        qty = amount_usd / current_price
+        
+        # Executa ordem de mercado
+        order = exchange.create_market_buy_order(symbol, qty)
+        
+        print(f"✅ ORDEM EXECUTADA!")
+        print(f"   ID: {order['id']}")
+        print(f"   Preço: ${order.get('average', current_price):.2f}")
+        print(f"   Quantidade: {order['filled']}")
+        
+        # Notifica no Telegram
+        msg = f"⚡ *COMPRA FORÇADA (TESTE)*\n\n🪙 Moeda: {symbol}\n💰 Preço: ${current_price:.2f}\n📦 Qtd: {order['filled']}\n🆔 Order ID: {order['id']}"
+        send_telegram_message(msg)
+        
+        # Registra na estratégia ativa
+        strategy_key = lab_state['selected_strategy']
+        trade = {
+            'time': datetime.now().strftime('%H:%M:%S'),
+            'type': f'⚡ FORCE BUY ({symbol})',
+            'price': order.get('average', current_price),
+            'qty': order['filled'],
+            'order_id': order['id'],
+            'mode': 'REAL (TESTE)'
+        }
+        lab_state['strategies'][strategy_key]['trades'].append(trade)
+        save_lab_data()
+        
+        return jsonify({
+            'success': True,
+            'message': f'✅ Compra executada! {order["filled"]} {symbol}',
+            'order_id': order['id'],
+            'price': order.get('average', current_price),
+            'qty': order['filled']
+        })
+        
+    except Exception as e:
+        error_msg = str(e)
+        print(f"❌ ERRO NA COMPRA FORÇADA: {error_msg}")
+        send_telegram_message(f"❌ *ERRO NA COMPRA FORÇADA*\n\n{error_msg}")
+        return jsonify({'success': False, 'error': error_msg}), 500
 
 
 @app.route('/api/export_data')
@@ -734,12 +972,30 @@ async def telegram_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
         market_context += f"\nSaldo do Usuário: {lab_state.get('real_balance', 0):.2f}\n"
         market_context += f"Estratégia Ativa: {lab_state['selected_strategy']}\n"
+        
+        # Adiciona regras da estratégia e estado do modo real
+        strategy_key = lab_state['selected_strategy']
+        is_live = lab_state['is_live']
+        
+        strategy_rules = "Desconhecida"
+        if strategy_key == 'conservative':
+            strategy_rules = "Comprar APENAS quando RSI < 30 e Preço < Banda Inferior."
+        elif strategy_key == 'aggressive':
+            strategy_rules = "Comprar quando RSI < 45 e Preço < Banda Inferior."
+        elif strategy_key == 'rsi_pure':
+            strategy_rules = "Comprar quando RSI < 30."
+            
+        market_context += f"Modo Real: {'ATIVADO 🚀' if is_live else 'DESATIVADO (Apenas Simulação) ⚠️'}\n"
+        market_context += f"Regras da Estratégia Atual: {strategy_rules}\n"
 
         system_prompt = (
             "Você é um assistente de trading experiente e útil conectado a um bot em tempo real.\n"
             "Você TEM acesso aos dados atuais do mercado fornecidos abaixo.\n"
             "Use esses dados para responder perguntas sobre preços, tendências e se vale a pena comprar/vender.\n"
-            "Se o usuário perguntar algo fora do contexto de trading, responda educadamente que seu foco é cripto.\n"
+            "IMPORTANTE: Se o usuário perguntar 'por que não comprou nada' ou 'por que não tem operações', "
+            "verifique se o RSI atual atende às regras da estratégia. Se o RSI estiver alto (ex: > 30 ou > 45), "
+            "explique que o mercado não está em ponto de compra segundo a estratégia.\n"
+            "Também verifique se o Modo Real está ativado.\n"
             "Responda de forma concisa, direta e use emojis.\n\n"
             f"{market_context}"
         )

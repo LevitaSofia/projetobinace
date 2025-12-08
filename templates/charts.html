@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>📊 Análise de Risco - Trading Bot</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <script src="https://unpkg.com/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js"></script>
+    <style>
+        body { background: #0d1117; color: #e6edf3; font-family: 'Segoe UI', sans-serif; padding: 20px; }
+        .card { background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 20px; margin-bottom: 20px; }
+        .coin-btn { padding: 8px 16px; margin: 4px; border: 2px solid #30363d; background: #161b22; color: #e6edf3; border-radius: 8px; cursor: pointer; font-weight: bold; }
+        .coin-btn:hover, .coin-btn.active { border-color: #fcd535; background: rgba(252, 213, 53, 0.15); color: #fcd535; }
+        .text-success { color: #0ecb81 !important; }
+        .text-danger { color: #f6465d !important; }
+        .text-warning { color: #fcd535 !important; }
+        .text-info { color: #3b82f6 !important; }
+        a { color: #fcd535; }
+        
+        /* Painel de Risco */
+        .risk-panel { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin: 20px 0; }
+        .risk-box { background: #0d1117; border-radius: 10px; padding: 20px; text-align: center; border-left: 4px solid; }
+        .risk-box.buy-zone { border-color: #0ecb81; }
+        .risk-box.sell-zone { border-color: #f6465d; }
+        .risk-box.neutral-zone { border-color: #fcd535; }
+        .risk-value { font-size: 2rem; font-weight: bold; }
+        .risk-label { color: #8b949e; font-size: 0.9rem; margin-top: 5px; }
+        
+        /* Sinal Grande */
+        .signal-box { padding: 25px; border-radius: 15px; text-align: center; margin: 20px 0; }
+        .signal-buy { background: linear-gradient(135deg, #0ecb81 0%, #087f52 100%); }
+        .signal-sell { background: linear-gradient(135deg, #f6465d 0%, #c62828 100%); }
+        .signal-wait { background: linear-gradient(135deg, #fcd535 0%, #b8860b 100%); color: #000; }
+        .signal-text { font-size: 2.5rem; font-weight: bold; }
+        .signal-reason { font-size: 1.1rem; margin-top: 10px; opacity: 0.9; }
+        
+        /* Barra de Posição */
+        .position-bar { position: relative; height: 60px; background: linear-gradient(to right, #0ecb81 0%, #0ecb81 20%, #fcd535 20%, #fcd535 80%, #f6465d 80%, #f6465d 100%); border-radius: 10px; margin: 20px 0; }
+        .position-marker { position: absolute; top: -10px; transform: translateX(-50%); font-size: 2rem; transition: left 0.5s ease; }
+        .position-labels { display: flex; justify-content: space-between; margin-top: 5px; font-size: 0.85rem; }
+        .zone-label { padding: 5px 10px; border-radius: 5px; }
+        
+        /* Tabela de Bandas */
+        .bands-table { width: 100%; margin-top: 15px; }
+        .bands-table td { padding: 12px; border-bottom: 1px solid #30363d; }
+        .bands-table .band-name { font-weight: bold; }
+        .bands-table .band-value { text-align: right; font-family: monospace; font-size: 1.1rem; }
+        .price-distance { font-size: 0.85rem; padding: 3px 8px; border-radius: 4px; }
+        .price-above { background: rgba(246, 70, 93, 0.2); color: #f6465d; }
+        .price-below { background: rgba(14, 203, 129, 0.2); color: #0ecb81; }
+        
+        #error-msg { color: #f6465d; padding: 15px; display: none; background: rgba(246, 70, 93, 0.1); border-radius: 8px; }
+    </style>
+</head>
+<body>
+    <div class="container-fluid">
+        <a href="/">← Voltar ao Painel Principal</a>
+        <h1 class="text-center my-4">📊 Análise de Risco e Bandas de Compra/Venda</h1>
+
+        <!-- Seletor de Moedas -->
+        <div class="card">
+            <h5><i class="fas fa-coins"></i> Selecione uma Moeda:</h5>
+            <div id="coin-selector"><div class="text-muted">Carregando moedas...</div></div>
+        </div>
+
+        <!-- Erro -->
+        <div id="error-msg"></div>
+
+        <!-- SINAL PRINCIPAL -->
+        <div id="signal-container" class="signal-box signal-wait">
+            <div class="signal-text" id="signal-text">⏳ CARREGANDO...</div>
+            <div class="signal-reason" id="signal-reason">Aguardando dados da API</div>
+        </div>
+
+        <!-- Barra Visual de Posição -->
+        <div class="card">
+            <h5>📍 Posição do Preço nas Bandas de Bollinger</h5>
+            <div class="position-bar">
+                <div class="position-marker" id="price-marker">📍</div>
+            </div>
+            <div class="position-labels">
+                <span class="zone-label text-success">🟢 ZONA DE COMPRA<br><small>Preço na Banda Inferior</small></span>
+                <span class="zone-label text-warning">🟡 ZONA NEUTRA<br><small>Preço na Média</small></span>
+                <span class="zone-label text-danger">🔴 ZONA DE VENDA<br><small>Preço na Banda Superior</small></span>
+            </div>
+        </div>
+
+        <!-- Painel de Indicadores de Risco -->
+        <div class="card">
+            <h5>🎯 Indicadores de Risco - <span id="selected-coin">XRP/USDT</span></h5>
+            <div class="risk-panel">
+                <div class="risk-box buy-zone">
+                    <div class="risk-value text-success" id="bb-lower">--</div>
+                    <div class="risk-label">🟢 BANDA INFERIOR (COMPRA)</div>
+                    <small class="text-muted">Se preço chegar aqui = BOM para comprar</small>
+                </div>
+                <div class="risk-box neutral-zone">
+                    <div class="risk-value text-warning" id="current-price">--</div>
+                    <div class="risk-label">💰 PREÇO ATUAL</div>
+                    <small class="text-muted" id="price-position">Calculando posição...</small>
+                </div>
+                <div class="risk-box sell-zone">
+                    <div class="risk-value text-danger" id="bb-upper">--</div>
+                    <div class="risk-label">🔴 BANDA SUPERIOR (VENDA)</div>
+                    <small class="text-muted">Se preço chegar aqui = BOM para vender</small>
+                </div>
+            </div>
+        </div>
+
+        <!-- Tabela Detalhada de Distâncias -->
+        <div class="card">
+            <h5>📏 Distância do Preço até as Bandas</h5>
+            <table class="bands-table">
+                <tr>
+                    <td class="band-name text-danger">🔴 Banda Superior (Resistência)</td>
+                    <td class="band-value" id="upper-value">--</td>
+                    <td class="band-value"><span class="price-distance" id="upper-dist">--</span></td>
+                </tr>
+                <tr>
+                    <td class="band-name text-warning">🟡 Média (SMA 20)</td>
+                    <td class="band-value" id="middle-value">--</td>
+                    <td class="band-value"><span class="price-distance" id="middle-dist">--</span></td>
+                </tr>
+                <tr>
+                    <td class="band-name text-success">🟢 Banda Inferior (Suporte)</td>
+                    <td class="band-value" id="lower-value">--</td>
+                    <td class="band-value"><span class="price-distance" id="lower-dist">--</span></td>
+                </tr>
+            </table>
+        </div>
+
+        <!-- RSI -->
+        <div class="card">
+            <h5>📊 RSI (Força do Mercado)</h5>
+            <div class="row align-items-center">
+                <div class="col-md-4 text-center">
+                    <div class="risk-value" id="current-rsi" style="font-size: 3rem;">--</div>
+                    <div class="risk-label">RSI Atual</div>
+                </div>
+                <div class="col-md-8">
+                    <div style="background: linear-gradient(to right, #0ecb81 0%, #0ecb81 30%, #fcd535 30%, #fcd535 70%, #f6465d 70%, #f6465d 100%); height: 30px; border-radius: 5px; position: relative;">
+                        <div id="rsi-marker" style="position: absolute; top: -8px; transform: translateX(-50%); font-size: 1.5rem;">▼</div>
+                    </div>
+                    <div class="d-flex justify-content-between mt-1">
+                        <small class="text-success">0-30: Sobrevendido<br>(COMPRAR)</small>
+                        <small class="text-warning">30-70: Neutro<br>(AGUARDAR)</small>
+                        <small class="text-danger">70-100: Sobrecomprado<br>(VENDER)</small>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Gráfico de Preço -->
+        <div class="card">
+            <h5>📈 Gráfico de Preço com Bandas de Bollinger</h5>
+            <div id="price-chart" style="height: 400px;"></div>
+            <div class="mt-2">
+                <span class="badge" style="background:#f6465d">━━ Banda Superior (Venda)</span>
+                <span class="badge" style="background:#fcd535; color:#000">━━ Média SMA</span>
+                <span class="badge" style="background:#0ecb81">━━ Banda Inferior (Compra)</span>
+            </div>
+        </div>
+
+        <!-- Gráfico RSI -->
+        <div class="card">
+            <h5>📉 Histórico RSI</h5>
+            <div id="rsi-chart" style="height: 200px;"></div>
+        </div>
+
+        <!-- Explicação -->
+        <div class="card">
+            <h5>📚 Como Interpretar</h5>
+            <div class="row">
+                <div class="col-md-6">
+                    <h6 class="text-success">🟢 Quando COMPRAR:</h6>
+                    <ul>
+                        <li>Preço próximo ou abaixo da <strong>Banda Inferior</strong></li>
+                        <li>RSI abaixo de <strong>30</strong> (sobrevendido)</li>
+                        <li>Quanto mais perto da banda verde, melhor!</li>
+                    </ul>
+                </div>
+                <div class="col-md-6">
+                    <h6 class="text-danger">🔴 Quando VENDER:</h6>
+                    <ul>
+                        <li>Preço próximo ou acima da <strong>Banda Superior</strong></li>
+                        <li>RSI acima de <strong>70</strong> (sobrecomprado)</li>
+                        <li>Quanto mais perto da banda vermelha, mais arriscado comprar!</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let priceChart, rsiChart, candleSeries, bbUpperLine, bbMiddleLine, bbLowerLine, rsiLine;
+        let currentSymbol = 'XRP-USDT';
+
+        function initCharts() {
+            const opts = {
+                layout: { background: { color: '#161b22' }, textColor: '#e6edf3' },
+                grid: { vertLines: { color: '#30363d' }, horzLines: { color: '#30363d' } },
+                rightPriceScale: { borderColor: '#30363d' },
+                timeScale: { borderColor: '#30363d', timeVisible: true }
+            };
+
+            priceChart = LightweightCharts.createChart(document.getElementById('price-chart'), opts);
+            candleSeries = priceChart.addCandlestickSeries({ upColor: '#0ecb81', downColor: '#f6465d', borderUpColor: '#0ecb81', borderDownColor: '#f6465d', wickUpColor: '#0ecb81', wickDownColor: '#f6465d' });
+            bbUpperLine = priceChart.addLineSeries({ color: '#f6465d', lineWidth: 2, lineStyle: 0 });
+            bbMiddleLine = priceChart.addLineSeries({ color: '#fcd535', lineWidth: 2 });
+            bbLowerLine = priceChart.addLineSeries({ color: '#0ecb81', lineWidth: 2, lineStyle: 0 });
+
+            rsiChart = LightweightCharts.createChart(document.getElementById('rsi-chart'), opts);
+            rsiLine = rsiChart.addLineSeries({ color: '#3b82f6', lineWidth: 2 });
+        }
+
+        async function loadWatchlist() {
+            try {
+                const res = await fetch('/api/watchlist');
+                const data = await res.json();
+                document.getElementById('coin-selector').innerHTML = data.watchlist.map(s => {
+                    const id = s.replace('/', '-');
+                    return `<button class="coin-btn ${id === currentSymbol ? 'active' : ''}" onclick="selectCoin('${id}')">${s.split('/')[0]}</button>`;
+                }).join('');
+            } catch (e) {
+                document.getElementById('coin-selector').innerHTML = '<span class="text-danger">Erro ao carregar</span>';
+            }
+        }
+
+        function selectCoin(symbol) {
+            currentSymbol = symbol;
+            document.querySelectorAll('.coin-btn').forEach(b => b.classList.toggle('active', b.textContent === symbol.split('-')[0]));
+            document.getElementById('selected-coin').textContent = symbol.replace('-', '/');
+            loadChartData(symbol);
+        }
+
+        async function loadChartData(symbol) {
+            try {
+                document.getElementById('error-msg').style.display = 'none';
+                const res = await fetch(`/api/chart/${symbol}`);
+                if (!res.ok) throw new Error(`Erro ${res.status}`);
+                const data = await res.json();
+                if (data.error) throw new Error(data.error);
+
+                const price = data.current_price;
+                const rsi = data.rsi.current;
+                const upper = data.bollinger.upper;
+                const middle = data.bollinger.middle;
+                const lower = data.bollinger.lower;
+
+                // Atualiza valores
+                document.getElementById('current-price').textContent = '$' + price.toFixed(4);
+                document.getElementById('bb-upper').textContent = '$' + upper.toFixed(4);
+                document.getElementById('bb-lower').textContent = '$' + lower.toFixed(4);
+                document.getElementById('upper-value').textContent = '$' + upper.toFixed(4);
+                document.getElementById('middle-value').textContent = '$' + middle.toFixed(4);
+                document.getElementById('lower-value').textContent = '$' + lower.toFixed(4);
+
+                // RSI
+                const rsiEl = document.getElementById('current-rsi');
+                rsiEl.textContent = rsi.toFixed(1);
+                rsiEl.className = 'risk-value ' + (rsi < 30 ? 'text-success' : rsi > 70 ? 'text-danger' : 'text-warning');
+                document.getElementById('rsi-marker').style.left = rsi + '%';
+
+                // Distâncias
+                const distUpper = ((upper - price) / price * 100);
+                const distMiddle = ((middle - price) / price * 100);
+                const distLower = ((lower - price) / price * 100);
+
+                updateDistance('upper-dist', distUpper);
+                updateDistance('middle-dist', distMiddle);
+                updateDistance('lower-dist', distLower);
+
+                // Posição na barra (0-100%)
+                const range = upper - lower;
+                const position = ((price - lower) / range) * 100;
+                const clampedPos = Math.max(5, Math.min(95, position));
+                document.getElementById('price-marker').style.left = clampedPos + '%';
+
+                // Texto de posição
+                let posText = '';
+                if (position < 20) posText = '🟢 Preço na ZONA DE COMPRA (próximo banda inferior)';
+                else if (position < 40) posText = '🟢 Preço abaixo da média (bom para comprar)';
+                else if (position < 60) posText = '🟡 Preço na zona neutra (próximo à média)';
+                else if (position < 80) posText = '🟠 Preço acima da média (cuidado)';
+                else posText = '🔴 Preço na ZONA DE VENDA (próximo banda superior)';
+                document.getElementById('price-position').textContent = posText;
+
+                // SINAL PRINCIPAL
+                updateSignal(price, rsi, upper, middle, lower);
+
+                // Gráficos
+                const candles = data.candles.map(c => ({ time: Math.floor(c.time / 1000), open: c.open, high: c.high, low: c.low, close: c.close }));
+                candleSeries.setData(candles);
+
+                if (data.bollinger.history?.length > 0) {
+                    bbUpperLine.setData(data.bollinger.history.map(b => ({ time: Math.floor(b.time / 1000), value: b.upper })));
+                    bbMiddleLine.setData(data.bollinger.history.map(b => ({ time: Math.floor(b.time / 1000), value: b.middle })));
+                    bbLowerLine.setData(data.bollinger.history.map(b => ({ time: Math.floor(b.time / 1000), value: b.lower })));
+                }
+
+                if (data.rsi.history?.length > 0) {
+                    rsiLine.setData(data.rsi.history.map(r => ({ time: Math.floor(r.time / 1000), value: r.value })));
+                }
+
+                priceChart.timeScale().fitContent();
+                rsiChart.timeScale().fitContent();
+
+            } catch (e) {
+                document.getElementById('error-msg').textContent = '❌ Erro: ' + e.message;
+                document.getElementById('error-msg').style.display = 'block';
+            }
+        }
+
+        function updateDistance(id, dist) {
+            const el = document.getElementById(id);
+            const sign = dist >= 0 ? '+' : '';
+            el.textContent = sign + dist.toFixed(2) + '%';
+            el.className = 'price-distance ' + (dist >= 0 ? 'price-below' : 'price-above');
+        }
+
+        function updateSignal(price, rsi, upper, middle, lower) {
+            const container = document.getElementById('signal-container');
+            const text = document.getElementById('signal-text');
+            const reason = document.getElementById('signal-reason');
+
+            const range = upper - lower;
+            const position = ((price - lower) / range) * 100;
+
+            if (rsi < 30 && position < 30) {
+                container.className = 'signal-box signal-buy';
+                text.textContent = '🎯 FORTE SINAL DE COMPRA!';
+                reason.textContent = `RSI=${rsi.toFixed(1)} (sobrevendido) + Preço próximo da banda inferior`;
+            } else if (rsi < 45 && position < 40) {
+                container.className = 'signal-box signal-buy';
+                text.textContent = '✅ BOM MOMENTO PARA COMPRAR';
+                reason.textContent = `RSI=${rsi.toFixed(1)} + Preço abaixo da média`;
+            } else if (rsi > 70 && position > 70) {
+                container.className = 'signal-box signal-sell';
+                text.textContent = '⚠️ ZONA DE RISCO - VENDER!';
+                reason.textContent = `RSI=${rsi.toFixed(1)} (sobrecomprado) + Preço próximo da banda superior`;
+            } else if (rsi > 60 && position > 60) {
+                container.className = 'signal-box signal-sell';
+                text.textContent = '🔴 EVITE COMPRAR AGORA';
+                reason.textContent = `RSI=${rsi.toFixed(1)} alto + Preço acima da média`;
+            } else {
+                container.className = 'signal-box signal-wait';
+                text.textContent = '⏳ AGUARDE MELHOR MOMENTO';
+                reason.textContent = `RSI=${rsi.toFixed(1)} | Preço na zona neutra - Sem sinal claro`;
+            }
+        }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            initCharts();
+            loadWatchlist();
+            setTimeout(() => loadChartData(currentSymbol), 500);
+            setInterval(() => loadChartData(currentSymbol), 15000);
+        });
+    </script>
+</body>
+</html>

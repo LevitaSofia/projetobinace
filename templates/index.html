@@ -123,9 +123,15 @@
         <!-- Header -->
         <div class="row mb-4">
             <div class="col-12">
-                <h1 class="text-center">
-                    <i class="fas fa-flask"></i> Laboratório de Trading Híbrido
-                </h1>
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                    <div></div>
+                    <h1 class="text-center mb-0">
+                        <i class="fas fa-flask"></i> Laboratório de Trading Híbrido
+                    </h1>
+                    <a href="/charts" class="btn btn-outline-warning btn-lg">
+                        <i class="fas fa-chart-line"></i> Ver Gráficos
+                    </a>
+                </div>
                 <p class="text-center text-muted">
                     Testando 3 estratégias simultaneamente | Preço BTC: $<span id="current-price">0.00</span> |
                     Atualizado: <span id="last-update">--:--:--</span> | Status: <span id="system-status" class="badge bg-secondary">---</span>
@@ -208,6 +214,15 @@
                     <div class="card-body text-center">
                         <h2 class="display-4 mb-0 fw-bold" id="strategy-action">AGUARDANDO</h2>
                         <p class="text-muted">Status Atual</p>
+                        
+                        <!-- BOTÃO DE COMPRA FORÇADA -->
+                        <div class="my-3">
+                            <button class="btn btn-warning btn-lg fw-bold" onclick="forceBuy()">
+                                <i class="fas fa-bolt"></i> FORÇAR COMPRA (Teste $11)
+                            </button>
+                            <p class="text-muted small mt-2 mb-0">⚠️ Ignora indicadores. Testa se a API funciona.</p>
+                        </div>
+                        
                         <hr class="border-secondary">
                         <div class="row mt-4">
                             <div class="col-6 border-end border-secondary">
@@ -252,9 +267,9 @@
                             <thead>
                                 <tr>
                                     <th>Moeda</th>
-                                    <th>Preço (BRL)</th>
+                                    <th>Preço (USD)</th>
                                     <th>RSI</th>
-                                    <th>Status</th>
+                                    <th>🔍 Diagnóstico (Por que não comprou?)</th>
                                 </tr>
                             </thead>
                             <tbody id="market-overview-body">
@@ -405,19 +420,30 @@
                     document.getElementById('indicator-bb').innerText = `$${data.indicators.bb_lower.toFixed(2)}`;
                 }
 
-                // --- Atualiza Radar de Mercado ---
+                // --- Atualiza Radar de Mercado com Diagnóstico ---
                 const marketBody = document.getElementById('market-overview-body');
                 if (data.market_overview && marketBody) {
                     marketBody.innerHTML = Object.entries(data.market_overview).map(([symbol, info]) => {
                         let rsiClass = info.rsi < 30 ? 'text-success fw-bold' : (info.rsi > 70 ? 'text-danger' : 'text-warning');
-                        let status = info.rsi < 30 ? 'Oportunidade? 🤔' : 'Aguardando...';
+                        
+                        // Usa o diagnóstico do backend
+                        let diagnostic = info.diagnostic || 'Aguardando...';
+                        let diagnosticClass = 'text-muted';
+                        
+                        if (diagnostic.includes('✅')) {
+                            diagnosticClass = 'text-success fw-bold';
+                        } else if (diagnostic.includes('🎯')) {
+                            diagnosticClass = 'text-info fw-bold';
+                        } else if (diagnostic.includes('⏳')) {
+                            diagnosticClass = 'text-warning';
+                        }
                         
                         return `
                             <tr>
                                 <td class="fw-bold text-white">${symbol}</td>
-                                <td class="text-white">R$ ${info.price.toFixed(2)}</td>
+                                <td class="text-white">$ ${info.price.toFixed(2)}</td>
                                 <td class="${rsiClass}">${info.rsi.toFixed(1)}</td>
-                                <td class="text-muted small">${status}</td>
+                                <td class="${diagnosticClass} small">${diagnostic}</td>
                             </tr>
                         `;
                     }).join('');
@@ -512,6 +538,42 @@
                 updateDashboard();
             } catch (error) {
                 console.error('Erro ao alternar modo:', error);
+            }
+        }
+
+        async function forceBuy() {
+            // Confirmação de segurança
+            if (!confirm('⚠️ ATENÇÃO!\n\nIsso vai executar uma COMPRA REAL de $11 na Binance.\n\nTem certeza que deseja continuar?')) {
+                return;
+            }
+            
+            const btn = document.querySelector('button[onclick="forceBuy()"]');
+            const originalText = btn.innerHTML;
+            btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> COMPRANDO...';
+            btn.disabled = true;
+            
+            try {
+                const response = await fetch('/api/force_buy', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ symbol: 'BTC/USDT' })
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    alert(`✅ SUCESSO!\n\n${data.message}\n\nOrder ID: ${data.order_id}\nPreço: $${data.price.toFixed(2)}`);
+                } else {
+                    alert(`❌ ERRO!\n\n${data.error}`);
+                }
+                
+                updateDashboard();
+            } catch (error) {
+                console.error('Erro na compra forçada:', error);
+                alert('❌ Erro de conexão: ' + error.message);
+            } finally {
+                btn.innerHTML = originalText;
+                btn.disabled = false;
             }
         }
 
