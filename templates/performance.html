@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>📊 Relatório de Performance</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        :root {
+            --dark-bg: #0d1117;
+            --card-bg: #161b22;
+            --border: #30363d;
+            --yellow: #fcd535;
+            --green: #0ecb81;
+            --red: #f6465d;
+            --text: #e6edf3;
+        }
+
+        body {
+            background-color: var(--dark-bg);
+            color: var(--text);
+            font-family: 'Inter', sans-serif;
+            padding: 20px;
+        }
+
+        .card {
+            background-color: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 20px;
+        }
+
+        .stat-card {
+            text-align: center;
+            padding: 30px 20px;
+        }
+
+        .stat-value {
+            font-size: 2.5rem;
+            font-weight: bold;
+        }
+
+        .stat-label {
+            color: #8b949e;
+            font-size: 0.9rem;
+            margin-top: 5px;
+        }
+
+        .positive { color: var(--green); }
+        .negative { color: var(--red); }
+        .neutral { color: var(--yellow); }
+
+        .trade-row {
+            padding: 12px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .trade-row:last-child {
+            border-bottom: none;
+        }
+
+        .progress-thin {
+            height: 8px;
+            border-radius: 4px;
+        }
+
+        .badge-win { background-color: var(--green); }
+        .badge-loss { background-color: var(--red); }
+
+        .header-nav {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 30px;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container-fluid">
+        <!-- Header -->
+        <div class="header-nav">
+            <a href="/" class="btn btn-outline-secondary">
+                <i class="fas fa-arrow-left"></i> Voltar
+            </a>
+            <h1 class="text-center mb-0">
+                <i class="fas fa-chart-pie"></i> Relatório de Performance
+            </h1>
+            <button class="btn btn-outline-warning" onclick="loadPerformance()">
+                <i class="fas fa-sync"></i> Atualizar
+            </button>
+        </div>
+
+        <!-- Resumo Principal -->
+        <div class="row mb-4">
+            <div class="col-md-3">
+                <div class="card stat-card">
+                    <div class="stat-value" id="total-trades">0</div>
+                    <div class="stat-label">Total de Trades</div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card stat-card">
+                    <div class="stat-value positive" id="win-rate">0%</div>
+                    <div class="stat-label">Taxa de Acerto</div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card stat-card">
+                    <div class="stat-value" id="total-profit">$0.00</div>
+                    <div class="stat-label">Lucro/Prejuízo Total</div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card stat-card">
+                    <div class="stat-value neutral" id="total-profit-pct">0%</div>
+                    <div class="stat-label">Retorno Total (%)</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Detalhes -->
+        <div class="row mb-4">
+            <div class="col-md-6">
+                <div class="card">
+                    <h5 class="mb-3"><i class="fas fa-trophy text-warning"></i> Estatísticas de Trades</h5>
+                    <div class="row">
+                        <div class="col-6">
+                            <div class="d-flex justify-content-between mb-2">
+                                <span class="text-muted">Trades Vencedores:</span>
+                                <span class="positive fw-bold" id="winning-trades">0</span>
+                            </div>
+                            <div class="d-flex justify-content-between mb-2">
+                                <span class="text-muted">Trades Perdedores:</span>
+                                <span class="negative fw-bold" id="losing-trades">0</span>
+                            </div>
+                            <div class="d-flex justify-content-between mb-2">
+                                <span class="text-muted">Trades Neutros:</span>
+                                <span class="fw-bold" id="neutral-trades">0</span>
+                            </div>
+                        </div>
+                        <div class="col-6">
+                            <div class="d-flex justify-content-between mb-2">
+                                <span class="text-muted">Maior Lucro:</span>
+                                <span class="positive fw-bold" id="best-trade">+0%</span>
+                            </div>
+                            <div class="d-flex justify-content-between mb-2">
+                                <span class="text-muted">Maior Perda:</span>
+                                <span class="negative fw-bold" id="worst-trade">0%</span>
+                            </div>
+                            <div class="d-flex justify-content-between mb-2">
+                                <span class="text-muted">Média por Trade:</span>
+                                <span class="fw-bold" id="avg-trade">0%</span>
+                            </div>
+                        </div>
+                    </div>
+                    <hr class="border-secondary">
+                    <div class="mb-2">
+                        <small class="text-muted">Taxa de Acerto</small>
+                        <div class="progress progress-thin mt-1">
+                            <div class="progress-bar bg-success" id="win-rate-bar" style="width: 0%"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="col-md-6">
+                <div class="card">
+                    <h5 class="mb-3"><i class="fas fa-wallet text-info"></i> Evolução do Capital</h5>
+                    <div class="d-flex justify-content-between mb-2">
+                        <span class="text-muted">Capital Inicial:</span>
+                        <span class="fw-bold" id="initial-capital">$0.00</span>
+                    </div>
+                    <div class="d-flex justify-content-between mb-2">
+                        <span class="text-muted">Capital Atual:</span>
+                        <span class="fw-bold text-warning" id="current-capital">$0.00</span>
+                    </div>
+                    <div class="d-flex justify-content-between mb-2">
+                        <span class="text-muted">Lucro Realizado:</span>
+                        <span class="fw-bold" id="realized-profit">$0.00</span>
+                    </div>
+                    <div class="d-flex justify-content-between mb-2">
+                        <span class="text-muted">Taxas Pagas (est.):</span>
+                        <span class="fw-bold text-danger" id="fees-paid">$0.00</span>
+                    </div>
+                    <hr class="border-secondary">
+                    <div class="d-flex justify-content-between">
+                        <span class="text-muted">Projeção Mensal (30 trades):</span>
+                        <span class="fw-bold text-success" id="monthly-projection">$0.00</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Histórico de Trades -->
+        <div class="card">
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <h5 class="mb-0"><i class="fas fa-history text-secondary"></i> Histórico de Trades</h5>
+                <span class="badge bg-secondary" id="trade-count">0 trades</span>
+            </div>
+            <div id="trades-list" style="max-height: 400px; overflow-y: auto;">
+                <div class="text-center text-muted py-5">
+                    <i class="fas fa-inbox fa-3x mb-3"></i>
+                    <p>Nenhum trade registrado ainda...</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Dicas -->
+        <div class="card border-info mt-4">
+            <h5 class="mb-3"><i class="fas fa-lightbulb text-warning"></i> Análise Automática</h5>
+            <div id="analysis-tips">
+                <p class="text-muted">Aguardando dados para análise...</p>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        async function loadPerformance() {
+            try {
+                const response = await fetch('/api/performance');
+                const data = await response.json();
+
+                // Estatísticas principais
+                document.getElementById('total-trades').innerText = data.total_trades;
+                document.getElementById('win-rate').innerText = data.win_rate.toFixed(1) + '%';
+                document.getElementById('win-rate').className = 'stat-value ' + (data.win_rate >= 50 ? 'positive' : 'negative');
+                
+                document.getElementById('total-profit').innerText = (data.total_profit >= 0 ? '+' : '') + '$' + data.total_profit.toFixed(2);
+                document.getElementById('total-profit').className = 'stat-value ' + (data.total_profit >= 0 ? 'positive' : 'negative');
+                
+                document.getElementById('total-profit-pct').innerText = (data.total_profit_pct >= 0 ? '+' : '') + data.total_profit_pct.toFixed(2) + '%';
+                document.getElementById('total-profit-pct').className = 'stat-value ' + (data.total_profit_pct >= 0 ? 'positive' : 'negative');
+
+                // Detalhes
+                document.getElementById('winning-trades').innerText = data.winning_trades;
+                document.getElementById('losing-trades').innerText = data.losing_trades;
+                document.getElementById('neutral-trades').innerText = data.neutral_trades;
+                document.getElementById('best-trade').innerText = '+' + data.best_trade.toFixed(2) + '%';
+                document.getElementById('worst-trade').innerText = data.worst_trade.toFixed(2) + '%';
+                document.getElementById('avg-trade').innerText = (data.avg_trade >= 0 ? '+' : '') + data.avg_trade.toFixed(2) + '%';
+                document.getElementById('avg-trade').className = 'fw-bold ' + (data.avg_trade >= 0 ? 'positive' : 'negative');
+
+                // Barra de progresso
+                document.getElementById('win-rate-bar').style.width = data.win_rate + '%';
+
+                // Capital
+                document.getElementById('initial-capital').innerText = '$' + data.initial_capital.toFixed(2);
+                document.getElementById('current-capital').innerText = '$' + data.current_capital.toFixed(2);
+                document.getElementById('realized-profit').innerText = (data.realized_profit >= 0 ? '+' : '') + '$' + data.realized_profit.toFixed(2);
+                document.getElementById('realized-profit').className = 'fw-bold ' + (data.realized_profit >= 0 ? 'positive' : 'negative');
+                document.getElementById('fees-paid').innerText = '-$' + data.fees_paid.toFixed(2);
+                document.getElementById('monthly-projection').innerText = '+$' + data.monthly_projection.toFixed(2);
+
+                // Lista de trades
+                document.getElementById('trade-count').innerText = data.trades.length + ' trades';
+                
+                if (data.trades.length > 0) {
+                    document.getElementById('trades-list').innerHTML = data.trades.map(trade => {
+                        const isWin = trade.profit_pct > 0;
+                        const profitClass = isWin ? 'positive' : (trade.profit_pct < 0 ? 'negative' : '');
+                        const badgeClass = isWin ? 'badge-win' : 'badge-loss';
+                        const icon = trade.type.includes('BUY') ? 'fa-arrow-down text-success' : 'fa-arrow-up text-danger';
+                        
+                        return `
+                            <div class="trade-row d-flex justify-content-between align-items-center">
+                                <div>
+                                    <i class="fas ${icon} me-2"></i>
+                                    <strong>${trade.symbol || 'N/A'}</strong>
+                                    <span class="badge bg-secondary ms-2">${trade.type}</span>
+                                </div>
+                                <div class="text-end">
+                                    <span class="me-3">$${trade.price.toFixed(2)}</span>
+                                    <span class="${profitClass} fw-bold">${trade.profit_pct >= 0 ? '+' : ''}${trade.profit_pct.toFixed(2)}%</span>
+                                    <small class="text-muted ms-2">${trade.time}</small>
+                                </div>
+                            </div>
+                        `;
+                    }).join('');
+                }
+
+                // Análise automática
+                let tips = [];
+                if (data.total_trades === 0) {
+                    tips.push('📊 Ainda não há trades para analisar. O bot está monitorando o mercado...');
+                } else {
+                    if (data.win_rate >= 60) {
+                        tips.push('✅ <strong>Excelente!</strong> Taxa de acerto acima de 60%. Continue assim!');
+                    } else if (data.win_rate >= 50) {
+                        tips.push('👍 <strong>Bom!</strong> Taxa de acerto positiva. O algoritmo está funcionando.');
+                    } else {
+                        tips.push('⚠️ <strong>Atenção:</strong> Taxa de acerto abaixo de 50%. Considere ajustar parâmetros.');
+                    }
+
+                    if (data.avg_trade > 0) {
+                        tips.push(`💰 Média de <strong>${data.avg_trade.toFixed(2)}%</strong> por trade. ${data.avg_trade > 1 ? 'Muito bom!' : 'Aceitável.'}`);
+                    }
+
+                    if (data.total_trades >= 10) {
+                        tips.push(`📈 Com ${data.total_trades} trades, os dados são mais confiáveis.`);
+                    } else {
+                        tips.push(`📊 Ainda com poucos trades (${data.total_trades}). Aguarde mais dados para análise precisa.`);
+                    }
+
+                    if (data.monthly_projection > 0) {
+                        tips.push(`🚀 Projeção mensal: <strong>+$${data.monthly_projection.toFixed(2)}</strong> (baseado na performance atual)`);
+                    }
+                }
+
+                document.getElementById('analysis-tips').innerHTML = tips.map(t => `<p class="mb-2">${t}</p>`).join('');
+
+            } catch (error) {
+                console.error('Erro ao carregar performance:', error);
+            }
+        }
+
+        // Carrega ao iniciar e atualiza a cada 10 segundos
+        loadPerformance();
+        setInterval(loadPerformance, 10000);
+    </script>
+</body>
+</html>

@@ -333,7 +333,7 @@ def get_diagnostic(strategy_name, price, rsi, bb_lower, position=None):
 
 
 def check_exit_signal(entry_price, current_price, rsi, bb_upper=None):
-    """Verifica sinal de saída com trailing stop inteligente."""
+    """Verifica sinal de saída - COMPENSANDO TAXAS (0.2% total)."""
     profit_pct = ((current_price - entry_price) / entry_price) * 100
     
     # Tolerância para banda superior (vende até 1% abaixo)
@@ -341,49 +341,44 @@ def check_exit_signal(entry_price, current_price, rsi, bb_upper=None):
     if bb_upper:
         tolerance = bb_upper * 0.01  # 1% de tolerância
         price_at_upper = current_price >= bb_upper - tolerance
-        if price_at_upper:
-            print(f"📈 PREÇO NA BANDA SUPERIOR! ${current_price:.2f} >= ${bb_upper - tolerance:.2f} (BB=${bb_upper:.2f})")
 
-    # === LÓGICA DE SAÍDA MELHORADA ===
+    # === LÓGICA COM TAXAS COMPENSADAS ===
+    # Taxa Binance: 0.1% compra + 0.1% venda = 0.2% total
     # 
-    # TAKE PROFIT DINÂMICO:
-    # - Se lucro > 3%: vende (bom lucro garantido)
-    # - Se lucro > 2% E RSI > 65: vende (mercado começando a esfriar)
-    # - Se preço na banda superior: vende (limite técnico)
+    # TAKE PROFIT (lucro líquido real):
+    # - 2.0% bruto = 1.8% líquido ✅
+    # - 1.5% bruto = 1.3% líquido ✅
+    # - 1.2% bruto = 1.0% líquido ✅
     #
     # STOP LOSS:
-    # - Se perda > 3%: vende (protege capital)
-    # - Se perda > 2% E RSI subindo (> 50): aguenta (pode recuperar)
-    #
-    # RSI:
-    # - RSI > 75: vende (muito sobrecomprado)
+    # - 2.5% perda bruta = 2.7% perda real (com taxas)
     
     should_sell = False
     reason = []
     
-    # Take Profits
-    if profit_pct >= 3.0:
+    # Take Profits (JÁ COMPENSANDO TAXAS)
+    if profit_pct >= 2.0:  # Lucro líquido: 1.8%
         should_sell = True
-        reason.append(f"🎯 Take Profit {profit_pct:.1f}%")
-    elif profit_pct >= 2.0 and rsi > 65:
+        reason.append(f"🎯 LUCRO {profit_pct:.1f}% (líquido ~{profit_pct-0.2:.1f}%)")
+    elif profit_pct >= 1.5 and rsi > 55:  # Lucro líquido: 1.3%
         should_sell = True
-        reason.append(f"📈 Lucro {profit_pct:.1f}% + RSI esfriando ({rsi:.0f})")
-    elif price_at_upper and profit_pct > 0.5:  # Só vende na banda se tiver algum lucro
+        reason.append(f"📈 Lucro {profit_pct:.1f}% + RSI bom ({rsi:.0f})")
+    elif profit_pct >= 1.2 and rsi > 60:  # Lucro líquido: 1.0%
+        should_sell = True
+        reason.append(f"💰 Lucro {profit_pct:.1f}% + Momentum ({rsi:.0f})")
+    elif price_at_upper and profit_pct > 0.5:  # Lucro líquido: 0.3%
         should_sell = True
         reason.append(f"📊 Banda Superior + Lucro {profit_pct:.1f}%")
     
-    # Stop Loss (mais conservador)
-    if profit_pct <= -3.0:
+    # Stop Loss (proteção - melhor perder pouco que muito)
+    if profit_pct <= -2.0:
         should_sell = True
         reason.append(f"🛑 Stop Loss {profit_pct:.1f}%")
-    elif profit_pct <= -2.0 and rsi > 55:  # Perdendo e mercado não está oversold
-        should_sell = True
-        reason.append(f"⚠️ Perda {profit_pct:.1f}% sem recuperação")
     
-    # RSI extremo
-    if rsi > 75:
+    # RSI sobrecomprado com lucro
+    if rsi > 70 and profit_pct > 0.5:
         should_sell = True
-        reason.append(f"🔥 RSI Extremo ({rsi:.0f})")
+        reason.append(f"🔥 RSI Alto ({rsi:.0f}) + Lucro {profit_pct:.1f}%")
     
     if should_sell:
         print(f"🔔 SINAL DE VENDA: {', '.join(reason)}")
@@ -524,6 +519,7 @@ def execute_real_trade(action, price, symbol):
             # Busca posição aberta para saber quanto vender
             if strategy['position']:
                 qty = strategy['position']['qty']
+                entry_price_original = strategy['position']['entry_price']
                 
                 # Verifica se realmente temos a moeda na carteira antes de vender
                 try:
@@ -531,15 +527,18 @@ def execute_real_trade(action, price, symbol):
                     coin = symbol.split('/')[0]  # Ex: 'XRP' de 'XRP/USDT'
                     coin_balance = balance['free'].get(coin, 0)
                     
-                    if coin_balance < qty * 0.99:  # 1% tolerância
-                        print(f"⚠️ Saldo real de {coin} insuficiente: {coin_balance:.8f} < {qty:.8f}")
-                        # Limpa posição fantasma
+                    if coin_balance <= 0:
+                        print(f"⚠️ Nenhum saldo de {coin} na carteira!")
                         strategy['position'] = None
                         send_telegram_message(f"⚠️ *POSIÇÃO LIMPA*\\n\\nNão há {coin} na carteira para vender.")
                         return False
                     
-                    # Usa o saldo real disponível
-                    qty = min(qty, coin_balance)
+                    # Se o saldo real é menor que o registrado, vende o que tem
+                    if coin_balance < qty:
+                        print(f"⚠️ Saldo real de {coin} menor que registrado: {coin_balance:.8f} < {qty:.8f}")
+                        print(f"📤 Vendendo o saldo disponível: {coin_balance:.8f} {coin}")
+                        qty = coin_balance
+                    
                 except Exception as e:
                     print(f"⚠️ Erro ao verificar saldo: {e}")
                 
@@ -601,8 +600,10 @@ def detect_existing_positions():
                 current_price = ticker['last']
                 coin_value_usdt = coin_balance * current_price
                 
-                # Se tiver mais de $5 em valor, considera como posição aberta
-                if coin_value_usdt >= 5:
+                print(f"💰 Encontrado {coin}: {coin_balance:.8f} (${coin_value_usdt:.2f})")
+                
+                # Se tiver mais de $1 em valor, considera como posição aberta
+                if coin_value_usdt >= 1:
                     # Estima o preço de entrada (usa o preço atual como fallback)
                     # Idealmente pegaria do histórico de trades
                     try:
@@ -709,12 +710,12 @@ def trading_loop():
                         print(f"🔎 {current_symbol}: RSI={rsi:.1f} | Preço=${price:.2f} | Saldo=${current_balance:.2f}")
 
                         # ========== 2.1 MODO REAL PRIMEIRO! ==========
-                        if lab_state['is_live']:
+                    if lab_state['is_live']:
                             selected = lab_state['selected_strategy']
                             strategy = lab_state['strategies'][selected]
 
                             if strategy['position'] is None:
-                                # DEBUG: Mostra análise detalhada SEMPRE para moedas com RSI bom
+                                # Sem posição - procura oportunidades de COMPRA
                                 tolerance = bb_lower * 0.005
                                 price_ok = price <= bb_lower + tolerance
                                 rsi_ok = rsi < 45
@@ -730,10 +731,16 @@ def trading_loop():
                                     if result:
                                         break # Sai do loop de moedas após compra bem-sucedida
                             else:
+                                # TEM POSIÇÃO - verifica VENDA
                                 pos_symbol = strategy['position'].get('symbol', SYMBOL)
+                                entry_price = strategy['position']['entry_price']
+                                profit_pct = ((price - entry_price) / entry_price) * 100
+                                
                                 if pos_symbol == current_symbol:
-                                    entry_price = strategy['position']['entry_price']
+                                    print(f"📍 POSIÇÃO ATIVA: {pos_symbol} | Entrada: ${entry_price:.2f} | Atual: ${price:.2f} | Lucro: {profit_pct:+.2f}%")
+                                    
                                     if check_exit_signal(entry_price, price, rsi, bb_upper):
+                                        print(f"💰 VENDENDO {pos_symbol}!")
                                         execute_real_trade('sell', price, current_symbol)
 
                         # Modo real sempre ativo - sem simulações
@@ -828,10 +835,176 @@ def charts_page():
     return render_template('charts.html')
 
 
+@app.route('/performance')
+def performance_page():
+    """Página de acompanhamento de performance."""
+    return render_template('performance.html')
+
+
+@app.route('/api/performance')
+def get_performance():
+    """Retorna estatísticas de performance das trades."""
+    try:
+        selected = lab_state['selected_strategy']
+        trades = lab_state['strategies'][selected].get('trades', [])
+        
+        # Estatísticas básicas
+        total_trades = len(trades)
+        
+        if total_trades == 0:
+            return jsonify({
+                'total_trades': 0,
+                'winning_trades': 0,
+                'losing_trades': 0,
+                'win_rate': 0,
+                'total_profit_pct': 0,
+                'total_profit_brl': 0,
+                'best_trade_pct': 0,
+                'worst_trade_pct': 0,
+                'avg_trade_pct': 0,
+                'accumulated_profit': [],
+                'trades': [],
+                'goal_current': 0,
+                'goal_target': 100
+            })
+        
+        # Calcula métricas
+        winning_trades = []
+        losing_trades = []
+        accumulated = []
+        cumulative = 0
+        
+        for trade in trades:
+            profit = trade.get('profit_pct', 0)
+            if profit >= 0:
+                winning_trades.append(trade)
+            else:
+                losing_trades.append(trade)
+            
+            cumulative += profit
+            accumulated.append({
+                'time': trade.get('exit_time', trade.get('time', '')),
+                'profit': round(cumulative, 2)
+            })
+        
+        profits = [t.get('profit_pct', 0) for t in trades]
+        
+        total_profit_pct = sum(profits)
+        best_trade = max(profits) if profits else 0
+        worst_trade = min(profits) if profits else 0
+        avg_trade = total_profit_pct / total_trades if total_trades > 0 else 0
+        win_rate = (len(winning_trades) / total_trades * 100) if total_trades > 0 else 0
+        
+        # Calcula lucro em BRL baseado no patrimônio atual
+        try:
+            usdt_balance = 0
+            if exchange:
+                balance = exchange.fetch_balance()
+                usdt_balance = balance.get('USDT', {}).get('total', 0) or 0
+            
+            # Estima lucro em BRL
+            usd_brl = 6.0
+            total_profit_brl = (usdt_balance * total_profit_pct / 100) * usd_brl
+        except:
+            total_profit_brl = 0
+        
+        # Prepara trades para exibição (últimas 50)
+        trades_display = []
+        for t in trades[-50:]:
+            trades_display.append({
+                'symbol': t.get('symbol', ''),
+                'type': t.get('action', t.get('type', '')),
+                'entry_price': t.get('entry_price', 0),
+                'exit_price': t.get('exit_price', 0),
+                'profit_pct': t.get('profit_pct', 0),
+                'entry_time': t.get('entry_time', t.get('time', '')),
+                'exit_time': t.get('exit_time', ''),
+                'reason': t.get('reason', '')
+            })
+        
+        return jsonify({
+            'total_trades': total_trades,
+            'winning_trades': len(winning_trades),
+            'losing_trades': len(losing_trades),
+            'win_rate': round(win_rate, 1),
+            'total_profit_pct': round(total_profit_pct, 2),
+            'total_profit_brl': round(total_profit_brl, 2),
+            'best_trade_pct': round(best_trade, 2),
+            'worst_trade_pct': round(worst_trade, 2),
+            'avg_trade_pct': round(avg_trade, 2),
+            'accumulated_profit': accumulated,
+            'trades': trades_display,
+            'goal_current': round(total_profit_brl, 2),
+            'goal_target': 100
+        })
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/status')
 def get_status():
     """Retorna estado completo do laboratório."""
     return jsonify(lab_state)
+
+
+@app.route('/api/position')
+def get_position():
+    """Retorna informações da posição ativa com lucro em tempo real."""
+    try:
+        selected = lab_state['selected_strategy']
+        position = lab_state['strategies'][selected].get('position')
+        
+        if not position:
+            return jsonify({'has_position': False})
+        
+        symbol = position.get('symbol', SYMBOL)
+        entry_price = position.get('entry_price', 0)
+        qty = position.get('qty', 0)
+        entry_time = position.get('entry_time', '')
+        
+        # Busca preço atual
+        current_price = lab_state.get('current_price', entry_price)
+        
+        # Tenta pegar preço atualizado da API
+        if exchange:
+            try:
+                ticker = exchange.fetch_ticker(symbol)
+                current_price = ticker['last']
+            except:
+                pass
+        
+        # Calcula lucro/prejuízo
+        profit_pct = ((current_price - entry_price) / entry_price) * 100 if entry_price > 0 else 0
+        profit_value = (current_price - entry_price) * qty
+        
+        # Calcula metas (COMPENSANDO TAXAS 0.2%)
+        take_profit_price = entry_price * 1.02   # +2% bruto = ~1.8% líquido
+        stop_loss_price = entry_price * 0.98     # -2%
+        
+        # Valor da posição
+        position_value = current_price * qty
+        entry_value = entry_price * qty
+        
+        return jsonify({
+            'has_position': True,
+            'symbol': symbol,
+            'entry_price': entry_price,
+            'current_price': current_price,
+            'qty': qty,
+            'entry_time': entry_time,
+            'profit_pct': profit_pct,
+            'profit_value': profit_value,
+            'take_profit_price': take_profit_price,
+            'stop_loss_price': stop_loss_price,
+            'position_value': position_value,
+            'entry_value': entry_value,
+            'distance_to_tp': ((take_profit_price - current_price) / current_price) * 100,
+            'distance_to_sl': ((current_price - stop_loss_price) / current_price) * 100
+        })
+        
+    except Exception as e:
+        return jsonify({'has_position': False, 'error': str(e)})
 
 
 @app.route('/api/chart/<symbol>')
