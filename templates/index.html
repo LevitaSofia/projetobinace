@@ -193,6 +193,12 @@
                             <div id="balance-list" class="d-flex flex-wrap gap-3">
                                 <span class="text-muted">Carregando saldos...</span>
                             </div>
+                            <hr class="border-secondary my-3">
+                            <div class="d-flex justify-content-between align-items-center">
+                                <h5 class="text-muted mb-0" style="color: #a0a0a0 !important;">💎 Patrimônio Total:</h5>
+                                <h3 id="total-patrimony" class="text-warning fw-bold mb-0">R$ ---</h3>
+                            </div>
+                            <small id="usdt-rate" class="text-muted">Cotação USDT: R$ ---</small>
                         </div>
                     </div>
                 </div>
@@ -399,6 +405,14 @@
                         `).join('');
                     } else {
                         balanceContainer.innerHTML = '<span class="text-muted">Nenhum saldo encontrado ou erro de conexão.</span>';
+                    }
+                    
+                    // Patrimônio Total em BRL
+                    if (data.user_info.total_brl !== undefined) {
+                        document.getElementById('total-patrimony').innerText = `R$ ${data.user_info.total_brl.toFixed(2)}`;
+                    }
+                    if (data.user_info.usdt_brl_rate !== undefined) {
+                        document.getElementById('usdt-rate').innerText = `Cotação USDT: R$ ${data.user_info.usdt_brl_rate.toFixed(2)}`;
                     }
                 }
 
