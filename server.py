@@ -267,8 +267,8 @@ def fetch_market_data(symbol):
         if not exchange:
             return None, None, None, None
 
-        # Busca últimas 100 velas de 5 minutos
-        ohlcv = exchange.fetch_ohlcv(symbol, '5m', limit=100)
+        # Busca últimas 100 velas de 1 HORA (mais confiável)
+        ohlcv = exchange.fetch_ohlcv(symbol, '1h', limit=100)
         closes = [candle[4] for candle in ohlcv]
         current_price = closes[-1]
 
@@ -282,17 +282,29 @@ def fetch_market_data(symbol):
 
 
 def check_strategy_signal(strategy_name, price, rsi, bb_lower):
-    """Verifica se dá sinal de compra (Trading Real)."""
-    # Tolerância: permite comprar até 1% acima da banda inferior (mais flexível)
-    tolerance = bb_lower * 0.01  # 1% de tolerância
+    """Verifica se dá sinal de compra (Trading Real ULTRA CONSERVADOR)."""
+    # ESTRATÉGIA ULTRA CONSERVADORA - Só entra quando TUDO confirma
+    # Exige: RSI < 25 (muito extremo) E preço na banda inferior
+    # Isso evita comprar em quedas que ainda vão continuar
     
-    # RSI < 35 (mais oversold = mais seguro) e preço próximo da banda inferior
-    # Ou RSI < 30 (extremamente oversold) independente do preço
-    rsi_oversold = rsi < 35
-    rsi_extreme = rsi < 30
-    price_good = price <= bb_lower + tolerance
+    tolerance = bb_lower * 0.005  # 0.5% de tolerância (mais rigoroso)
     
-    return (rsi_oversold and price_good) or rsi_extreme
+    # CONDIÇÃO 1: RSI MUITO baixo (< 25 é extremamente raro e forte)
+    rsi_very_extreme = rsi < 25
+    
+    # CONDIÇÃO 2: Preço DEVE estar na banda inferior ou abaixo
+    price_at_bottom = price <= bb_lower + tolerance
+    
+    # SÓ COMPRA SE AMBAS AS CONDIÇÕES FOREM VERDADEIRAS
+    # RSI < 25 sozinho não basta - o preço precisa estar na banda inferior
+    # Isso evita comprar em quedas rápidas mas com preço ainda alto
+    
+    should_buy = rsi_very_extreme and price_at_bottom
+    
+    if should_buy:
+        print(f"🎯 SINAL FORTE: RSI={rsi:.1f} (<25) + Preço na banda inferior!")
+    
+    return should_buy
 
 
 def get_diagnostic(strategy_name, price, rsi, bb_lower, position=None):
@@ -310,18 +322,22 @@ def get_diagnostic(strategy_name, price, rsi, bb_lower, position=None):
     if usdt_balance < MIN_ORDER_VALUE:
         return f"💸 SALDO BAIXO (${usdt_balance:.2f} < ${MIN_ORDER_VALUE})"
     
-    # Analisa condições de compra (novos parâmetros)
+    # Analisa condições de compra (ESTRATÉGIA ULTRA CONSERVADORA)
     issues = []
-    rsi_target = 35  # Mais conservador
-    rsi_extreme = 30  # Compra forte
-    tolerance = bb_lower * 0.01  # 1% tolerância
+    rsi_target = 25  # Muito mais rigoroso
+    tolerance = bb_lower * 0.005  # 0.5% tolerância
     
-    # Se RSI extremamente baixo, é sinal forte
-    if rsi < rsi_extreme:
-        return "🚨 RSI EXTREMO! OPORTUNIDADE DE COMPRA!"
+    # Se RSI E preço estão bons, é sinal forte
+    if rsi < rsi_target and price <= bb_lower + tolerance:
+        return "🚨 RSI < 25 + BANDA INFERIOR! COMPRA FORTE!"
+    
+    # RSI baixo mas preço não está na banda
+    if rsi < rsi_target:
+        diff_pct = ((price - bb_lower) / bb_lower) * 100
+        return f"⚠️ RSI bom ({rsi:.1f}) mas preço {diff_pct:.1f}% acima da banda"
     
     if rsi >= rsi_target:
-        issues.append(f"RSI Alto ({rsi:.1f} / Alvo: <{rsi_target})")
+        issues.append(f"RSI={rsi:.1f} (precisa <25)")
     if price > bb_lower + tolerance:
         diff_pct = ((price - bb_lower) / bb_lower) * 100
         issues.append(f"Preço {diff_pct:.1f}% acima da banda")
@@ -356,22 +372,31 @@ def check_exit_signal(entry_price, current_price, rsi, bb_upper=None):
     should_sell = False
     reason = []
     
-    # Take Profits (JÁ COMPENSANDO TAXAS)
-    if profit_pct >= 2.0:  # Lucro líquido: 1.8%
+    # === ESTRATÉGIA MAIS ESPERTA ===
+    # Vende mais cedo quando está em zona de venda!
+    
+    # Take Profits
+    if profit_pct >= 4.0:  # Meta principal: 4% (mais seguro com R$300)
         should_sell = True
         reason.append(f"🎯 LUCRO {profit_pct:.1f}% (líquido ~{profit_pct-0.2:.1f}%)")
-    elif profit_pct >= 1.5 and rsi > 55:  # Lucro líquido: 1.3%
+    elif profit_pct >= 3.0 and rsi > 55:  # 3% + RSI médio-alto
         should_sell = True
-        reason.append(f"📈 Lucro {profit_pct:.1f}% + RSI bom ({rsi:.0f})")
-    elif profit_pct >= 1.2 and rsi > 60:  # Lucro líquido: 1.0%
+        reason.append(f"📈 Lucro {profit_pct:.1f}% + RSI ({rsi:.0f})")
+    elif profit_pct >= 2.5 and rsi > 60:  # 2.5% + RSI alto
         should_sell = True
-        reason.append(f"💰 Lucro {profit_pct:.1f}% + Momentum ({rsi:.0f})")
-    elif price_at_upper and profit_pct > 0.5:  # Lucro líquido: 0.3%
+        reason.append(f"💰 Lucro {profit_pct:.1f}% + RSI ({rsi:.0f})")
+    elif profit_pct >= 2.0 and rsi > 65:  # 2% + RSI muito alto
         should_sell = True
-        reason.append(f"📊 Banda Superior + Lucro {profit_pct:.1f}%")
+        reason.append(f"📊 Lucro {profit_pct:.1f}% + RSI forte ({rsi:.0f})")
+    elif profit_pct >= 0.5 and rsi > 68:  # 0.5% + RSI extremo
+        should_sell = True
+        reason.append(f"⚡ Lucro {profit_pct:.1f}% + RSI extremo ({rsi:.0f})")
+    elif price_at_upper and profit_pct > 0.5:  # Na banda superior com lucro
+        should_sell = True
+        reason.append(f"🔴 BANDA SUPERIOR + Lucro {profit_pct:.1f}%")
     
-    # Stop Loss (proteção - melhor perder pouco que muito)
-    if profit_pct <= -2.0:
+    # Stop Loss (2.5%) - Mais tolerante com R$300
+    if profit_pct <= -2.5:
         should_sell = True
         reason.append(f"🛑 Stop Loss {profit_pct:.1f}%")
     
@@ -531,6 +556,17 @@ def execute_real_trade(action, price, symbol):
                         print(f"⚠️ Nenhum saldo de {coin} na carteira!")
                         strategy['position'] = None
                         send_telegram_message(f"⚠️ *POSIÇÃO LIMPA*\\n\\nNão há {coin} na carteira para vender.")
+                        return False
+                    
+                    # DETECTA DUST: saldo muito pequeno para vender (< $2 ou < 0.001 para BNB)
+                    coin_value_usdt = coin_balance * price
+                    min_qty = 0.001 if coin == 'BNB' else 0.0001  # Mínimos do Binance
+                    
+                    if coin_balance < min_qty or coin_value_usdt < 2:
+                        print(f"🧹 DUST DETECTADO: {coin_balance:.8f} {coin} (${coin_value_usdt:.4f})")
+                        print(f"🧹 Limpando posição fantasma - muito pequeno para vender")
+                        strategy['position'] = None
+                        send_telegram_message(f"🧹 *DUST LIMPO*\\n\\n{coin_balance:.8f} {coin} (${coin_value_usdt:.4f})\\nMuito pequeno para vender.")
                         return False
                     
                     # Se o saldo real é menor que o registrado, vende o que tem
@@ -978,9 +1014,9 @@ def get_position():
         profit_pct = ((current_price - entry_price) / entry_price) * 100 if entry_price > 0 else 0
         profit_value = (current_price - entry_price) * qty
         
-        # Calcula metas (COMPENSANDO TAXAS 0.2%)
-        take_profit_price = entry_price * 1.02   # +2% bruto = ~1.8% líquido
-        stop_loss_price = entry_price * 0.98     # -2%
+        # Calcula metas (ESTRATÉGIA OTIMIZADA)
+        take_profit_price = entry_price * 1.03   # +3% bruto = ~2.8% líquido
+        stop_loss_price = entry_price * 0.985    # -1.5%
         
         # Valor da posição
         position_value = current_price * qty
@@ -1005,6 +1041,29 @@ def get_position():
         
     except Exception as e:
         return jsonify({'has_position': False, 'error': str(e)})
+
+
+@app.route('/api/clear-position', methods=['POST'])
+def clear_position():
+    """Limpa posição manualmente (para emergências como dust)."""
+    try:
+        selected = lab_state['selected_strategy']
+        strategy = lab_state['strategies'][selected]
+        
+        old_position = strategy.get('position')
+        strategy['position'] = None
+        
+        if old_position:
+            symbol = old_position.get('symbol', 'N/A')
+            qty = old_position.get('qty', 0)
+            print(f"🧹 POSIÇÃO LIMPA MANUALMENTE: {qty} {symbol}")
+            send_telegram_message(f"🧹 *POSIÇÃO LIMPA MANUALMENTE*\\n\\n{qty} {symbol}")
+            return jsonify({'success': True, 'message': f'Posição limpa: {qty} {symbol}'})
+        else:
+            return jsonify({'success': True, 'message': 'Nenhuma posição ativa para limpar'})
+        
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
 
 
 @app.route('/api/chart/<symbol>')
