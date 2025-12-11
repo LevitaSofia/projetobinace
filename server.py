@@ -282,27 +282,26 @@ def fetch_market_data(symbol):
 
 
 def check_strategy_signal(strategy_name, price, rsi, bb_lower):
-    """Verifica se dá sinal de compra (Trading Real ULTRA CONSERVADOR)."""
-    # ESTRATÉGIA ULTRA CONSERVADORA - Só entra quando TUDO confirma
-    # Exige: RSI < 25 (muito extremo) E preço na banda inferior
-    # Isso evita comprar em quedas que ainda vão continuar
+    """Verifica se dá sinal de compra (Trading Real EQUILIBRADO)."""
+    # ESTRATÉGIA EQUILIBRADA para R$300
+    # Exige: RSI < 35 E preço na banda inferior
+    # Bom equilíbrio entre segurança e oportunidades
     
-    tolerance = bb_lower * 0.005  # 0.5% de tolerância (mais rigoroso)
+    tolerance = bb_lower * 0.01  # 1% de tolerância
     
-    # CONDIÇÃO 1: RSI MUITO baixo (< 25 é extremamente raro e forte)
-    rsi_very_extreme = rsi < 25
+    # CONDIÇÃO 1: RSI baixo (< 35 = sobrevenda)
+    rsi_low = rsi < 35
     
     # CONDIÇÃO 2: Preço DEVE estar na banda inferior ou abaixo
     price_at_bottom = price <= bb_lower + tolerance
     
     # SÓ COMPRA SE AMBAS AS CONDIÇÕES FOREM VERDADEIRAS
-    # RSI < 25 sozinho não basta - o preço precisa estar na banda inferior
-    # Isso evita comprar em quedas rápidas mas com preço ainda alto
+    # RSI baixo + preço na banda = boa entrada
     
-    should_buy = rsi_very_extreme and price_at_bottom
+    should_buy = rsi_low and price_at_bottom
     
     if should_buy:
-        print(f"🎯 SINAL FORTE: RSI={rsi:.1f} (<25) + Preço na banda inferior!")
+        print(f"🎯 SINAL DE COMPRA: RSI={rsi:.1f} (<35) + Preço na banda inferior!")
     
     return should_buy
 
@@ -322,14 +321,14 @@ def get_diagnostic(strategy_name, price, rsi, bb_lower, position=None):
     if usdt_balance < MIN_ORDER_VALUE:
         return f"💸 SALDO BAIXO (${usdt_balance:.2f} < ${MIN_ORDER_VALUE})"
     
-    # Analisa condições de compra (ESTRATÉGIA ULTRA CONSERVADORA)
+    # Analisa condições de compra (ESTRATÉGIA EQUILIBRADA)
     issues = []
-    rsi_target = 25  # Muito mais rigoroso
-    tolerance = bb_lower * 0.005  # 0.5% tolerância
+    rsi_target = 35  # Equilibrado
+    tolerance = bb_lower * 0.01  # 1% tolerância
     
     # Se RSI E preço estão bons, é sinal forte
     if rsi < rsi_target and price <= bb_lower + tolerance:
-        return "🚨 RSI < 25 + BANDA INFERIOR! COMPRA FORTE!"
+        return "🚨 RSI < 35 + BANDA INFERIOR! COMPRA!"
     
     # RSI baixo mas preço não está na banda
     if rsi < rsi_target:
@@ -337,7 +336,7 @@ def get_diagnostic(strategy_name, price, rsi, bb_lower, position=None):
         return f"⚠️ RSI bom ({rsi:.1f}) mas preço {diff_pct:.1f}% acima da banda"
     
     if rsi >= rsi_target:
-        issues.append(f"RSI={rsi:.1f} (precisa <25)")
+        issues.append(f"RSI={rsi:.1f} (precisa <35)")
     if price > bb_lower + tolerance:
         diff_pct = ((price - bb_lower) / bb_lower) * 100
         issues.append(f"Preço {diff_pct:.1f}% acima da banda")
