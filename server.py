@@ -7,18 +7,38 @@ from datetime import datetime
 from flask import Flask, jsonify, render_template, request
 from dotenv import load_dotenv
 import ccxt
-import pandas as pd
 import numpy as np
 import requests
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 import asyncio
 from openai import OpenAI
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
 
+import logging
+import traceback
+
+# Configuração de Logs
+logging.basicConfig(
+    filename='sistema_trading.log',
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    encoding='utf-8'
+)
+
 # Carrega variáveis de ambiente
 load_dotenv()
 
 app = Flask(__name__)
+
+
+@app.after_request
+def add_no_cache_headers(response):
+    response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    response.headers['Pragma'] = 'no-cache'
+    response.headers['Expires'] = '0'
+    return response
 
 # Configurações
 API_KEY = os.getenv('BINANCE_API_KEY')
@@ -82,13 +102,17 @@ exchange = None
 try:
     # Primeiro, obtém a diferença de tempo com o servidor da Binance
     exchange_temp = ccxt.binance({'enableRateLimit': True})
-    try:
-        server_time = exchange_temp.fetch_time()
-        local_time = int(time.time() * 1000)
-        time_diff = server_time - local_time
-        print(f"⏰ Sincronizando tempo: diferença de {time_diff}ms com servidor Binance")
-    except:
-        time_diff = 0
+    time_diff = 0
+    for i in range(3):
+        try:
+            server_time = exchange_temp.fetch_time()
+            local_time = int(time.time() * 1000)
+            time_diff = server_time - local_time
+            print(f"⏰ Sincronizando tempo: diferença de {time_diff}ms com servidor Binance")
+            break
+        except Exception as e:
+            print(f"⚠️ Tentativa {i+1} de sincronizar tempo falhou: {e}")
+            time.sleep(1)
     
     exchange_config = {
         'apiKey': API_KEY,
@@ -112,6 +136,7 @@ try:
         print(f"🌍 Usando Proxy configurado: {proxy_url}")
 
     exchange = ccxt.binance(exchange_config)
+    public_exchange = ccxt.binance({'enableRateLimit': True}) # Instância pública para fallback
     
     # Força sincronização de tempo
     print("⏳ Sincronizando relógio com a Binance...")
@@ -211,6 +236,149 @@ def send_telegram_message(message):
     except Exception as e:
         print(f"❌ Erro ao enviar Telegram: {e}")
 
+
+# ==================== SISTEMA DE RELATÓRIOS AUTOMÁTICOS ====================
+
+# Horários para enviar relatórios (formato 24h)
+REPORT_HOURS = [8, 12, 18, 22]  # 8h, 12h, 18h, 22h
+last_report_hour = -1  # Controle para não repetir relatório na mesma hora
+
+def generate_market_report():
+    """Gera relatório completo de todas as moedas."""
+    report_lines = []
+    report_lines.append("📊 *RELATÓRIO DO BOT DE TRADING*")
+    report_lines.append(f"🕐 {datetime.now().strftime('%d/%m/%Y %H:%M')}")
+    report_lines.append("")
+    
+    # Status do bot
+    status = "🟢 ATIVO" if lab_state.get('running') else "🔴 PARADO"
+    mode = "💰 REAL" if lab_state.get('is_live') else "🧪 SIMULAÇÃO"
+    report_lines.append(f"*Status:* {status} | {mode}")
+    
+    # Saldo
+    usdt = lab_state.get('real_balance', 0)
+    report_lines.append(f"*Saldo USDT:* ${usdt:.2f}")
+    report_lines.append("")
+    
+    # Posição atual
+    selected = lab_state.get('selected_strategy', 'aggressive')
+    strategy = lab_state.get('strategies', {}).get(selected, {})
+    position = strategy.get('position')
+    
+    if position:
+        pos_symbol = position.get('symbol', 'N/A')
+        entry = position.get('entry_price', 0)
+        report_lines.append(f"📍 *POSIÇÃO ABERTA:* {pos_symbol}")
+        report_lines.append(f"   Entrada: ${entry:.2f}")
+        report_lines.append("")
+    else:
+        report_lines.append("📍 *Sem posição aberta*")
+        report_lines.append("")
+    
+    # Análise de cada moeda
+    report_lines.append("*ANÁLISE DAS MOEDAS:*")
+    report_lines.append("")
+    
+    opportunities = []
+    close_opportunities = []
+    
+    for symbol in WATCHLIST:
+        try:
+            price, rsi, bb_lower, bb_upper = fetch_market_data(symbol)
+            if price and rsi and bb_lower:
+                tolerance = bb_lower * 0.01
+                buy_limit = bb_lower + tolerance
+                
+                # Calcula distância do preço para a zona de compra
+                dist_to_buy = ((price - buy_limit) / buy_limit) * 100
+                
+                # Determina emoji e status
+                if rsi < 35 and price <= buy_limit:
+                    emoji = "🟢"
+                    status = "COMPRA!"
+                    opportunities.append(symbol)
+                elif rsi < 40 or dist_to_buy < 2:
+                    emoji = "🟡"
+                    status = "QUASE"
+                    close_opportunities.append((symbol, rsi, dist_to_buy))
+                elif rsi > 70:
+                    emoji = "🔴"
+                    status = "RISCO"
+                else:
+                    emoji = "⚪"
+                    status = "AGUARD"
+                
+                # Linha do relatório
+                coin_name = symbol.replace('/USDT', '')
+                report_lines.append(f"{emoji} *{coin_name}*: RSI={rsi:.0f} | ${price:.2f}")
+                report_lines.append(f"   └ Limite compra: ${buy_limit:.2f} ({dist_to_buy:+.1f}%)")
+        except Exception as e:
+            print(f"Erro ao analisar {symbol}: {e}")
+    
+    report_lines.append("")
+    
+    # Resumo
+    if opportunities:
+        report_lines.append(f"🚨 *OPORTUNIDADES AGORA:* {', '.join(opportunities)}")
+    elif close_opportunities:
+        report_lines.append("⚠️ *MOEDAS PRÓXIMAS DE COMPRA:*")
+        for sym, rsi, dist in close_opportunities:
+            coin = sym.replace('/USDT', '')
+            report_lines.append(f"   • {coin}: RSI={rsi:.0f}, falta {abs(dist):.1f}% p/ banda")
+    else:
+        report_lines.append("😴 *Nenhuma oportunidade no momento*")
+        report_lines.append("   Aguardando RSI < 35 + preço na banda inferior")
+    
+    return "\n".join(report_lines)
+
+
+def send_daily_report():
+    """Envia relatório diário via Telegram."""
+    try:
+        report = generate_market_report()
+        send_telegram_message(report)
+        print(f"📨 Relatório enviado às {datetime.now().strftime('%H:%M')}")
+        logging.info("Relatório diário enviado via Telegram")
+    except Exception as e:
+        print(f"❌ Erro ao enviar relatório: {e}")
+        logging.error(f"Erro ao enviar relatório: {e}")
+
+
+def send_opportunity_alert(symbol, price, rsi, bb_lower):
+    """Envia alerta quando uma moeda está próxima de compra."""
+    tolerance = bb_lower * 0.01
+    buy_limit = bb_lower + tolerance
+    dist = ((price - buy_limit) / buy_limit) * 100
+    
+    msg = f"""
+🔔 *ALERTA DE OPORTUNIDADE*
+
+*{symbol}* está se aproximando da zona de compra!
+
+📊 RSI: {rsi:.1f} (precisa < 35)
+💰 Preço: ${price:.2f}
+📉 Banda Inferior: ${bb_lower:.2f}
+🎯 Limite compra: ${buy_limit:.2f}
+📏 Distância: {dist:+.1f}%
+
+{"🟢 *CONDIÇÕES OK!*" if rsi < 35 and dist <= 0 else "⏳ Aguardando..."}
+"""
+    send_telegram_message(msg)
+
+
+def check_and_send_reports():
+    """Verifica se está na hora de enviar relatório."""
+    global last_report_hour
+    current_hour = datetime.now().hour
+    
+    # Só envia se mudou de hora e está em um dos horários programados
+    if current_hour in REPORT_HOURS and current_hour != last_report_hour:
+        last_report_hour = current_hour
+        send_daily_report()
+
+
+# ==================== FIM SISTEMA DE RELATÓRIOS ====================
+
 def analyze_market_with_gpt(symbol, price, rsi, bb_lower, action_type):
     """Usa GPT para analisar o contexto do trade."""
     if not openai_client:
@@ -264,12 +432,15 @@ MIN_ORDER_VALUE = 11.0
 def fetch_market_data(symbol):
     """Busca dados de mercado para análise."""
     try:
-        if not exchange:
-            return None, None, None, None
-
         # Busca últimas 100 velas de 1 HORA (mais confiável)
-        ohlcv = exchange.fetch_ohlcv(symbol, '1h', limit=100)
-        closes = [candle[4] for candle in ohlcv]
+        # Usando requests para evitar erro de chave
+        url = 'https://api.binance.com/api/v3/klines'
+        params = {'symbol': symbol.replace('/', ''), 'interval': '1h', 'limit': 100}
+        r = requests.get(url, params=params, timeout=10, verify=False)
+        r.raise_for_status()
+        raw_data = r.json()
+        
+        closes = [float(candle[4]) for candle in raw_data]
         current_price = closes[-1]
 
         rsi = calculate_rsi(closes)
@@ -745,13 +916,13 @@ def trading_loop():
                         print(f"🔎 {current_symbol}: RSI={rsi:.1f} | Preço=${price:.2f} | Saldo=${current_balance:.2f}")
 
                         # ========== 2.1 MODO REAL PRIMEIRO! ==========
-                    if lab_state['is_live']:
+                        if lab_state['is_live']:
                             selected = lab_state['selected_strategy']
                             strategy = lab_state['strategies'][selected]
 
                             if strategy['position'] is None:
                                 # Sem posição - procura oportunidades de COMPRA
-                                tolerance = bb_lower * 0.005
+                                tolerance = bb_lower * 0.01  # 1% de tolerância (igual check_strategy_signal)
                                 price_ok = price <= bb_lower + tolerance
                                 rsi_ok = rsi < 45
                                 signal = check_strategy_signal(selected, price, rsi, bb_lower)
@@ -778,7 +949,6 @@ def trading_loop():
                                         print(f"💰 VENDENDO {pos_symbol}!")
                                         execute_real_trade('sell', price, current_symbol)
 
-                        # Modo real sempre ativo - sem simulações
                 else:
                     lab_state['status'] = 'Em Standby (Monitorando...) zzz'
                 
@@ -850,6 +1020,9 @@ def trading_loop():
 
             # 4. Salva estado
             save_lab_data()
+            
+            # 5. Verifica se está na hora de enviar relatório via Telegram
+            check_and_send_reports()
 
             # time.sleep(5)  # Aguarda 5 segundos (Removido pois já tem sleep no loop de moedas)
 
@@ -977,6 +1150,26 @@ def get_performance():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/send_report', methods=['POST'])
+def send_report_now():
+    """Envia relatório imediatamente via Telegram."""
+    try:
+        send_daily_report()
+        return jsonify({'success': True, 'message': 'Relatório enviado!'})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/report')
+def get_report():
+    """Retorna relatório em formato texto para visualização."""
+    try:
+        report = generate_market_report()
+        return jsonify({'report': report})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/status')
 def get_status():
     """Retorna estado completo do laboratório."""
@@ -1076,7 +1269,30 @@ def get_chart_data(symbol):
             return jsonify({'error': 'Exchange não conectada'}), 500
         
         # Busca últimas 100 velas de 5 minutos
-        ohlcv = exchange.fetch_ohlcv(symbol_clean, '5m', limit=100)
+        # USANDO REQUESTS DIRETAMENTE (API PÚBLICA) PARA EVITAR ERRO DE CHAVE
+        try:
+            url = 'https://api.binance.com/api/v3/klines'
+            params = {'symbol': symbol_clean.replace('/', ''), 'interval': '5m', 'limit': 100}
+            r = requests.get(url, params=params, timeout=10, verify=False)
+            r.raise_for_status()
+            raw_data = r.json()
+            # Converte formato da API (strings) para formato CCXT (floats)
+            ohlcv = []
+            for row in raw_data:
+                ohlcv.append([
+                    row[0],          # Time
+                    float(row[1]),   # Open
+                    float(row[2]),   # High
+                    float(row[3]),   # Low
+                    float(row[4]),   # Close
+                    float(row[5])    # Volume
+                ])
+        except Exception as e:
+            print(f"❌ Erro ao buscar dados públicos para {symbol_clean}: {e}")
+            raise e
+        
+        # Formata dados
+        candles = []
         
         # Formata dados
         candles = []
@@ -1134,6 +1350,8 @@ def get_chart_data(symbol):
         })
         
     except Exception as e:
+        logging.error(f"Erro em get_chart_data: {e}")
+        logging.error(traceback.format_exc())
         return jsonify({'error': str(e)}), 500
 
 
@@ -1461,11 +1679,19 @@ thread.start()
 
 
 if __name__ == '__main__':
-    print("="*60)
-    print("🏗️  LABORATÓRIO DE TRADING HÍBRIDO")
-    print("="*60)
-    print(f"API Key: {API_KEY[:8] + '...' if API_KEY else 'NÃO CONFIGURADO'}")
-    print(f"Secret: {'✓ Configurado' if SECRET else '✗ Não configurado'}")
-    print(f"Símbolo: {SYMBOL}")
-    print("="*60)
-    app.run(host='0.0.0.0', debug=True, port=5000, use_reloader=False)
+    try:
+        print("="*60)
+        print("🏗️  LABORATÓRIO DE TRADING HÍBRIDO")
+        print("="*60)
+        print(f"API Key: {API_KEY[:8] + '...' if API_KEY else 'NÃO CONFIGURADO'}")
+        print(f"Secret: {'✓ Configurado' if SECRET else '✗ Não configurado'}")
+        print(f"Símbolo: {SYMBOL}")
+        print("="*60)
+        
+        logging.info("Iniciando servidor Flask...")
+        app.run(host='0.0.0.0', debug=False, port=5000, use_reloader=False)
+    except Exception as e:
+        logging.error(f"Erro fatal no main: {e}")
+        logging.error(traceback.format_exc())
+        print(f"❌ Erro fatal: {e}")
+        input("Pressione ENTER para sair...")

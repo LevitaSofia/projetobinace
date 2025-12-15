@@ -5,6 +5,10 @@
 # Dados do laboratório
 lab_data.json
 
+# Logs
+*.log
+sistema_trading.log
+
 # Python
 __pycache__/
 *.py[cod]
