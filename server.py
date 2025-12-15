@@ -57,14 +57,24 @@ SYMBOL = os.getenv('SYMBOL', 'BTC/USDT')
 AMOUNT_INVEST = float(os.getenv('AMOUNT_INVEST', 11.0))
 FEE_RATE = 0.001  # 0.1%
 
-# Configuração OpenAI
+# Configuração OpenAI (inicialização lazy para evitar bloqueio SSL)
 openai_client = None
-if OPENAI_API_KEY and OPENAI_API_KEY != 'your_openai_api_key_here':
-    try:
-        openai_client = OpenAI(api_key=OPENAI_API_KEY)
-        print("🧠 OpenAI (GPT) Configurado")
-    except Exception as e:
-        print(f"⚠️ Erro ao configurar OpenAI: {e}")
+_openai_initialized = False
+
+def get_openai_client():
+    """Inicializa OpenAI client sob demanda"""
+    global openai_client, _openai_initialized
+    if _openai_initialized:
+        return openai_client
+    _openai_initialized = True
+    if OPENAI_API_KEY and OPENAI_API_KEY != 'your_openai_api_key_here':
+        try:
+            openai_client = OpenAI(api_key=OPENAI_API_KEY)
+            print("🧠 OpenAI (GPT) Configurado")
+        except Exception as e:
+            print(f"⚠️ Erro ao configurar OpenAI: {e}")
+            openai_client = None
+    return openai_client
 
 # Estado Global
 lab_state = {
@@ -381,7 +391,8 @@ def check_and_send_reports():
 
 def analyze_market_with_gpt(symbol, price, rsi, bb_lower, action_type):
     """Usa GPT para analisar o contexto do trade."""
-    if not openai_client:
+    client = get_openai_client()
+    if not client:
         return "🤖 IA não configurada."
 
     prompt = f"""
@@ -396,7 +407,7 @@ def analyze_market_with_gpt(symbol, price, rsi, bb_lower, action_type):
     """
 
     try:
-        response = openai_client.chat.completions.create(
+        response = client.chat.completions.create(
             model="gpt-3.5-turbo",
             messages=[
                 {"role": "system", "content": "Você é um assistente de trading cripto conciso."},
@@ -519,69 +530,79 @@ def get_diagnostic(strategy_name, price, rsi, bb_lower, position=None):
 
 
 def check_exit_signal(entry_price, current_price, rsi, bb_upper=None):
-    """Verifica sinal de saída - COMPENSANDO TAXAS (0.2% total)."""
+    """
+    Verifica sinal de saída - CONSERVADOR para não vender precipitadamente.
+    
+    REGRAS:
+    1. NUNCA vende com RSI baixo (< 40) - mercado sobrevendido, pode subir
+    2. NUNCA vende com prejuízo EXCETO stop loss
+    3. Stop Loss só em -3% (mais tolerante)
+    4. Take Profit precisa de lucro REAL + RSI alto
+    """
     profit_pct = ((current_price - entry_price) / entry_price) * 100
     
-    # Tolerância para banda superior (vende até 1% abaixo)
+    # === PROTEÇÃO ANTI-PRECIPITAÇÃO ===
+    # Se RSI está baixo, mercado pode subir - NÃO VENDE (exceto stop loss grave)
+    if rsi < 40 and profit_pct > -5:
+        print(f"⏳ RSI baixo ({rsi:.1f}) - Aguardando recuperação...")
+        return False
+    
+    # Tolerância para banda superior
     price_at_upper = False
     if bb_upper:
-        tolerance = bb_upper * 0.01  # 1% de tolerância
+        tolerance = bb_upper * 0.01
         price_at_upper = current_price >= bb_upper - tolerance
 
-    # === LÓGICA COM TAXAS COMPENSADAS ===
-    # Taxa Binance: 0.1% compra + 0.1% venda = 0.2% total
-    # 
-    # TAKE PROFIT (lucro líquido real):
-    # - 2.0% bruto = 1.8% líquido ✅
-    # - 1.5% bruto = 1.3% líquido ✅
-    # - 1.2% bruto = 1.0% líquido ✅
-    #
-    # STOP LOSS:
-    # - 2.5% perda bruta = 2.7% perda real (com taxas)
-    
     should_sell = False
     reason = []
     
-    # === ESTRATÉGIA MAIS ESPERTA ===
-    # Vende mais cedo quando está em zona de venda!
+    # === TAKE PROFIT (só com RSI ALTO = confirmação de topo) ===
+    # Taxa Binance: 0.1% compra + 0.1% venda = 0.2% total
     
-    # Take Profits
-    if profit_pct >= 4.0:  # Meta principal: 4% (mais seguro com R$300)
+    if profit_pct >= 5.0:  # 5% = vende sempre (lucro excelente)
         should_sell = True
-        reason.append(f"🎯 LUCRO {profit_pct:.1f}% (líquido ~{profit_pct-0.2:.1f}%)")
-    elif profit_pct >= 3.0 and rsi > 55:  # 3% + RSI médio-alto
+        reason.append(f"🎯 LUCRO FORTE {profit_pct:.1f}%!")
+    elif profit_pct >= 3.5 and rsi > 55:  # 3.5% + RSI subindo
         should_sell = True
         reason.append(f"📈 Lucro {profit_pct:.1f}% + RSI ({rsi:.0f})")
     elif profit_pct >= 2.5 and rsi > 60:  # 2.5% + RSI alto
         should_sell = True
-        reason.append(f"💰 Lucro {profit_pct:.1f}% + RSI ({rsi:.0f})")
+        reason.append(f"💰 Lucro {profit_pct:.1f}% + RSI bom ({rsi:.0f})")
     elif profit_pct >= 2.0 and rsi > 65:  # 2% + RSI muito alto
         should_sell = True
         reason.append(f"📊 Lucro {profit_pct:.1f}% + RSI forte ({rsi:.0f})")
-    elif profit_pct >= 0.5 and rsi > 68:  # 0.5% + RSI extremo
+    elif profit_pct >= 1.5 and rsi > 70:  # 1.5% + RSI sobrecomprado
         should_sell = True
-        reason.append(f"⚡ Lucro {profit_pct:.1f}% + RSI extremo ({rsi:.0f})")
-    elif price_at_upper and profit_pct > 0.5:  # Na banda superior com lucro
+        reason.append(f"🔥 Lucro {profit_pct:.1f}% + RSI extremo ({rsi:.0f})")
+    elif price_at_upper and profit_pct >= 1.5 and rsi > 55:  # Banda superior + lucro + RSI ok
         should_sell = True
         reason.append(f"🔴 BANDA SUPERIOR + Lucro {profit_pct:.1f}%")
     
-    # Stop Loss (2.5%) - Mais tolerante com R$300
-    if profit_pct <= -2.5:
+    # === STOP LOSS (só em perda GRAVE) ===
+    # Mais tolerante: -3% para dar chance de recuperar
+    if profit_pct <= -3.0:
         should_sell = True
-        reason.append(f"🛑 Stop Loss {profit_pct:.1f}%")
+        reason.append(f"🛑 STOP LOSS {profit_pct:.1f}% - Cortando perdas")
     
-    # RSI sobrecomprado com lucro
-    if rsi > 70 and profit_pct > 0.5:
+    # === STOP LOSS DE EMERGÊNCIA ===
+    # Se perdendo muito, vende independente de RSI
+    if profit_pct <= -5.0:
         should_sell = True
-        reason.append(f"🔥 RSI Alto ({rsi:.0f}) + Lucro {profit_pct:.1f}%")
+        reason.append(f"🚨 EMERGÊNCIA {profit_pct:.1f}% - Saindo!")
     
     if should_sell:
         print(f"🔔 SINAL DE VENDA: {', '.join(reason)}")
+    else:
+        # Log para debug quando NÃO vende
+        if profit_pct < 0:
+            print(f"⏳ Aguardando: Prejuízo {profit_pct:.1f}% (Stop em -3%) | RSI={rsi:.1f}")
+        elif profit_pct > 0 and profit_pct < 1.5:
+            print(f"⏳ Aguardando: Lucro {profit_pct:.1f}% (Meta mínima 1.5%) | RSI={rsi:.1f}")
     
     return should_sell
 
 
-def convert_brl_to_usdt():
+def convert_brl_to_usdt(min_brl=20):
     """Converte BRL para USDT automaticamente quando necessário."""
     try:
         balance = exchange.fetch_balance()
@@ -590,14 +611,15 @@ def convert_brl_to_usdt():
         
         # Se já tem USDT suficiente, não precisa converter
         if usdt_balance >= MIN_ORDER_VALUE:
+            print(f"✅ Saldo USDT OK: ${usdt_balance:.2f}")
             return usdt_balance
         
         # Se não tem BRL suficiente para converter
-        if brl_balance < 50:  # Mínimo para conversão (BRL)
-            print(f"⚠️ Saldo BRL insuficiente para conversão: R${brl_balance:.2f}")
+        if brl_balance < min_brl:
+            print(f"⚠️ Saldo BRL insuficiente para conversão: R${brl_balance:.2f} (mínimo R${min_brl})")
             return usdt_balance
         
-        # Busca cotação BRL/USDT
+        # Busca cotação USDT/BRL
         try:
             ticker = exchange.fetch_ticker('USDT/BRL')
             usdt_price_brl = ticker['last']  # Preço de 1 USDT em BRL
@@ -612,12 +634,18 @@ def convert_brl_to_usdt():
             order = exchange.create_market_buy_order('USDT/BRL', usdt_qty)
             
             new_usdt = order['filled']
-            print(f"✅ Conversão concluída! Recebido: ${new_usdt:.2f} USDT")
+            total_usdt = usdt_balance + new_usdt
+            print(f"✅ Conversão concluída! Recebido: ${new_usdt:.2f} USDT | Total: ${total_usdt:.2f}")
+            
+            # Notifica no Telegram
+            msg = f"🔄 *CONVERSÃO BRL → USDT*\n\n💵 Convertido: R${brl_to_use:.2f}\n💰 Recebido: ${new_usdt:.2f} USDT\n📊 Saldo total: ${total_usdt:.2f} USDT"
+            send_telegram_message(msg)
             
             # Atualiza saldo no estado
-            lab_state['real_balance'] = new_usdt
+            lab_state['real_balance'] = total_usdt
+            lab_state['brl_balance'] = brl_balance - brl_to_use
             
-            return new_usdt
+            return total_usdt
             
         except Exception as e:
             print(f"❌ Erro na conversão BRL->USDT: {e}")
@@ -628,6 +656,7 @@ def convert_brl_to_usdt():
                 order = exchange.create_market_sell_order('BRL/USDT', brl_balance * 0.95)
                 new_usdt = order['cost']  # USDT recebido
                 print(f"✅ Conversão alternativa concluída! Recebido: ${new_usdt:.2f} USDT")
+                send_telegram_message(f"🔄 Conversão BRL→USDT: ${new_usdt:.2f}")
                 lab_state['real_balance'] = new_usdt
                 return new_usdt
             except:
@@ -683,26 +712,40 @@ def execute_real_trade(action, price, symbol):
             
             # Ordem de compra REAL
             order = exchange.create_market_buy_order(symbol, qty)
+            
+            buy_price = order['average'] or price
+            buy_qty = order['filled']
+            buy_total = buy_price * buy_qty
+            rsi = lab_state['indicators']['rsi']
 
             trade = {
                 'time': datetime.now().strftime('%H:%M:%S'),
                 'type': f'BUY REAL ({symbol})',
-                'price': order['average'] or price,
-                'qty': order['filled'],
+                'price': buy_price,
+                'qty': buy_qty,
                 'order_id': order['id'],
                 'mode': 'REAL'
             }
             strategy['trades'].append(trade)
             # Salva o símbolo na posição para saber o que vender depois
             strategy['position'] = {
-                'entry_price': price, 'qty': order['filled'], 'entry_time': datetime.now().isoformat(), 'symbol': symbol}
+                'entry_price': buy_price, 
+                'qty': buy_qty, 
+                'entry_time': datetime.now().isoformat(), 
+                'symbol': symbol
+            }
             
-            print(
-                f"💰 [{strategy['name']}] COMPRA REAL: {order['filled']} {symbol} @ ${order['average']:.2f}")
+            print(f"💰 [{strategy['name']}] COMPRA REAL: {buy_qty:.4f} {symbol} @ ${buy_price:.4f}")
             
-            # Notificação Telegram (sem IA para economizar tokens)
-            rsi = lab_state['indicators']['rsi']
-            msg = f"💰 *COMPRA REAL*\\n\\n🪙 Moeda: {symbol}\\n💵 Preço: ${price:.2f}\\n📊 RSI: {rsi:.1f}"
+            # Notificação Telegram COMPLETA
+            msg = (
+                f"💰 *COMPRA REAL*\\n\\n"
+                f"🪙 Moeda: {symbol}\\n"
+                f"💵 Preço: ${buy_price:.4f}\\n"
+                f"📊 Qtd: {buy_qty:.4f}\\n"
+                f"💰 Total: ${buy_total:.2f}\\n"
+                f"📈 RSI: {rsi:.1f}"
+            )
             send_telegram_message(msg)
             
             # Atualiza cooldown
@@ -715,6 +758,29 @@ def execute_real_trade(action, price, symbol):
             if strategy['position']:
                 qty = strategy['position']['qty']
                 entry_price_original = strategy['position']['entry_price']
+                
+                # === PROTEÇÃO ANTI-PRECIPITAÇÃO NA VENDA ===
+                current_rsi = lab_state['indicators'].get('rsi', 50)
+                profit_check = ((price - entry_price_original) / entry_price_original) * 100
+                
+                # BLOQUEIO: RSI < 40 = mercado sobrevendido, NÃO VENDE (exceto emergência)
+                if current_rsi < 40 and profit_check > -5:
+                    print(f"🛡️ VENDA BLOQUEADA! RSI={current_rsi:.1f} (muito baixo)")
+                    print(f"   O mercado está sobrevendido, pode subir!")
+                    print(f"   Lucro atual: {profit_check:.2f}%")
+                    send_telegram_message(
+                        f"🛡️ *VENDA BLOQUEADA*\\n\\n"
+                        f"RSI muito baixo: {current_rsi:.1f}\\n"
+                        f"Mercado pode subir!\\n"
+                        f"Lucro atual: {profit_check:+.2f}%"
+                    )
+                    return False
+                
+                # BLOQUEIO: Prejuízo < 3% e não é emergência
+                if profit_check < 0 and profit_check > -3:
+                    print(f"🛡️ VENDA BLOQUEADA! Prejuízo {profit_check:.2f}% < Stop Loss (-3%)")
+                    print(f"   Aguardando recuperação ou stop loss...")
+                    return False
                 
                 # Verifica se realmente temos a moeda na carteira antes de vender
                 try:
@@ -749,25 +815,44 @@ def execute_real_trade(action, price, symbol):
                     print(f"⚠️ Erro ao verificar saldo: {e}")
                 
                 order = exchange.create_market_sell_order(symbol, qty)
+                
+                # Salva dados da posição ANTES de limpar
+                entry_price = strategy['position']['entry_price'] if strategy.get('position') else price
+                entry_qty = strategy['position'].get('qty', qty) if strategy.get('position') else qty
+                entry_time = strategy['position'].get('entry_time', 'N/A') if strategy.get('position') else 'N/A'
+                
+                sell_price = order['average'] or price
+                profit_pct = ((sell_price - entry_price) / entry_price) * 100 if entry_price > 0 else 0
+                profit_usdt = (sell_price - entry_price) * order['filled']
+                rsi = lab_state['indicators']['rsi']
 
                 trade = {
                     'time': datetime.now().strftime('%H:%M:%S'),
                     'type': f'SELL REAL ({symbol})',
-                    'price': order['average'] or price,
+                    'price': sell_price,
                     'qty': order['filled'],
                     'order_id': order['id'],
-                    'mode': 'REAL'
+                    'mode': 'REAL',
+                    'entry_price': entry_price,  # Salva preço de compra
+                    'profit_pct': profit_pct,    # Salva % lucro
+                    'profit_usdt': profit_usdt   # Salva lucro em USDT
                 }
                 strategy['trades'].append(trade)
                 strategy['position'] = None # Limpa posição
-                print(
-                    f"💵 [{strategy['name']}] VENDA REAL: {order['filled']} {symbol} @ ${order['average']:.2f}")
                 
-                # Notificação Telegram (sem IA para economizar tokens)
-                entry_price = strategy['position']['entry_price'] if strategy.get('position') else price
-                profit_pct = ((price - entry_price) / entry_price) * 100 if entry_price > 0 else 0
-                rsi = lab_state['indicators']['rsi']
-                msg = f"💵 *VENDA REAL*\\n\\n🪙 Moeda: {symbol}\\n💵 Preço: ${price:.2f}\\n📈 Lucro: {profit_pct:+.1f}%\\n📊 RSI: {rsi:.1f}"
+                print(f"💵 [{strategy['name']}] VENDA REAL: {order['filled']} {symbol} @ ${sell_price:.2f}")
+                print(f"📊 Compra: ${entry_price:.4f} → Venda: ${sell_price:.4f} = {profit_pct:+.2f}% (${profit_usdt:+.4f})")
+                
+                # Notificação Telegram COMPLETA
+                msg = (
+                    f"💵 *VENDA REAL*\\n\\n"
+                    f"🪙 Moeda: {symbol}\\n"
+                    f"📥 Compra: ${entry_price:.4f}\\n"
+                    f"📤 Venda: ${sell_price:.4f}\\n"
+                    f"📊 Qtd: {order['filled']:.4f}\\n"
+                    f"{'🟢' if profit_pct >= 0 else '🔴'} Lucro: {profit_pct:+.2f}% (${profit_usdt:+.2f})\\n"
+                    f"📈 RSI: {rsi:.1f}"
+                )
                 send_telegram_message(msg)
                 
                 # Atualiza cooldown
@@ -872,6 +957,15 @@ def trading_loop():
                          break
             
             target_coins = [active_symbol] if active_symbol else WATCHLIST
+            
+            # ATUALIZA SALDO ANTES de verificar sinais de compra
+            if exchange and API_KEY:
+                try:
+                    balance = exchange.fetch_balance()
+                    lab_state['real_balance'] = balance['total'].get('USDT', 0.0)
+                    lab_state['brl_balance'] = balance['total'].get('BRL', 0.0)
+                except Exception as e:
+                    print(f"⚠️ Erro ao atualizar saldo: {e}")
 
             for current_symbol in target_coins:
                 # 1. Busca dados de mercado (agora inclui banda superior)
@@ -945,8 +1039,31 @@ def trading_loop():
                                 if pos_symbol == current_symbol:
                                     print(f"📍 POSIÇÃO ATIVA: {pos_symbol} | Entrada: ${entry_price:.2f} | Atual: ${price:.2f} | Lucro: {profit_pct:+.2f}%")
                                     
-                                    if check_exit_signal(entry_price, price, rsi, bb_upper):
-                                        print(f"💰 VENDENDO {pos_symbol}!")
+                                    # LOG DETALHADO antes de verificar venda
+                                    print(f"🔍 [DEBUG] Verificando saída: RSI={rsi:.1f} | Lucro={profit_pct:.2f}% | BB_Upper=${bb_upper:.2f if bb_upper else 0}")
+                                    
+                                    should_sell = check_exit_signal(entry_price, price, rsi, bb_upper)
+                                    
+                                    if should_sell:
+                                        # LOG COMPLETO ANTES DE VENDER
+                                        print(f"⚠️ [VENDA AUTORIZADA]")
+                                        print(f"   Moeda: {pos_symbol}")
+                                        print(f"   Entrada: ${entry_price:.4f}")
+                                        print(f"   Atual: ${price:.4f}")
+                                        print(f"   Lucro: {profit_pct:+.2f}%")
+                                        print(f"   RSI: {rsi:.1f}")
+                                        print(f"   BB Upper: ${bb_upper:.2f if bb_upper else 0}")
+                                        
+                                        # Envia alerta Telegram ANTES de executar
+                                        send_telegram_message(
+                                            f"⚠️ *INICIANDO VENDA*\\n\\n"
+                                            f"🪙 {pos_symbol}\\n"
+                                            f"📥 Compra: ${entry_price:.4f}\\n"
+                                            f"📤 Venda: ${price:.4f}\\n"
+                                            f"📊 Lucro: {profit_pct:+.2f}%\\n"
+                                            f"📈 RSI: {rsi:.1f}"
+                                        )
+                                        
                                         execute_real_trade('sell', price, current_symbol)
 
                 else:
@@ -977,8 +1094,10 @@ def trading_loop():
                     usdt_balance = balance['total'].get('USDT', 0.0)
                     brl_balance = balance['total'].get('BRL', 0.0)
                     
-                    # Define o saldo principal baseado no que tiver mais valor
-                    lab_state['real_balance'] = usdt_balance if usdt_balance > brl_balance else brl_balance
+                    # SEMPRE usa USDT como saldo principal para trading
+                    # BRL precisa ser convertido para USDT antes de comprar cripto
+                    lab_state['real_balance'] = usdt_balance
+                    lab_state['brl_balance'] = brl_balance
                     
                     # Filtra saldos > 0 para exibir
                     relevant_balances = {}
@@ -1411,6 +1530,36 @@ def toggle_running():
     return jsonify({'success': True, 'running': running})
 
 
+@app.route('/api/convert_brl', methods=['POST'])
+def convert_brl_endpoint():
+    """🔄 Converte BRL para USDT manualmente."""
+    if not exchange or not API_KEY or not SECRET:
+        return jsonify({'success': False, 'error': '❌ Chaves API não configuradas!'}), 400
+    
+    try:
+        # Busca saldos atuais
+        balance = exchange.fetch_balance()
+        brl_before = balance['total'].get('BRL', 0.0)
+        usdt_before = balance['total'].get('USDT', 0.0)
+        
+        if brl_before < 10:
+            return jsonify({'success': False, 'error': f'Saldo BRL muito baixo: R${brl_before:.2f}'}), 400
+        
+        # Converte
+        new_usdt = convert_brl_to_usdt(min_brl=10)
+        
+        return jsonify({
+            'success': True,
+            'message': f'✅ Conversão realizada!',
+            'brl_before': brl_before,
+            'usdt_before': usdt_before,
+            'usdt_after': new_usdt
+        })
+        
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
 @app.route('/api/force_buy', methods=['POST'])
 def force_buy():
     """⚡ COMPRA FORÇADA - Ignora indicadores, testa conexão com Binance."""
@@ -1456,6 +1605,15 @@ def force_buy():
             'mode': 'REAL (TESTE)'
         }
         lab_state['strategies'][strategy_key]['trades'].append(trade)
+        
+        # SALVA POSIÇÃO para acompanhamento
+        lab_state['strategies'][strategy_key]['position'] = {
+            'entry_price': order.get('average', current_price),
+            'qty': order['filled'],
+            'entry_time': datetime.now().isoformat(),
+            'symbol': symbol
+        }
+        
         save_lab_data()
         
         return jsonify({
@@ -1519,18 +1677,36 @@ def export_data():
 async def telegram_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 Olá! Sou o Bot do Laboratório de Trading.\n\n"
-        "Comandos disponíveis:\n"
-        "/status - Ver preço e indicadores atuais\n"
-        "/saldo - Ver saldo da conta\n"
-        "/ajuda - Ver lista de comandos"
+        "📋 *COMANDOS DISPONÍVEIS:*\n\n"
+        "📊 /status - Ver situação atual do bot\n"
+        "💰 /saldo - Ver saldo da conta\n"
+        "📈 /posicao - Ver posição aberta\n"
+        "🔍 /moedas - Ver análise de todas moedas\n"
+        "📑 /relatorio - Relatório completo\n"
+        "⚡ /comprar XRP - Forçar compra\n"
+        "💵 /converter - Converter BRL para USDT\n"
+        "🔔 /ligar - Ligar o bot\n"
+        "🔕 /desligar - Desligar o bot\n"
+        "❓ /ajuda - Ver ajuda",
+        parse_mode='Markdown'
     )
 
 async def telegram_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🤖 *Comandos do Bot:*\n\n"
-        "/status - Mostra o que o bot está analisando agora.\n"
-        "/saldo - Mostra seu saldo em BRL e USDT.\n"
-        "/start - Inicia o bot.",
+        "🤖 *COMANDOS DO BOT:*\n\n"
+        "*Informações:*\n"
+        "/status - Mostra o que o bot está analisando\n"
+        "/saldo - Mostra seu saldo em BRL e USDT\n"
+        "/posicao - Mostra posição aberta (se houver)\n"
+        "/moedas - Análise de todas as 10 moedas\n"
+        "/relatorio - Relatório completo do mercado\n\n"
+        "*Ações:*\n"
+        "/comprar XRP - Força compra de uma moeda\n"
+        "/converter - Converte BRL para USDT\n"
+        "/ligar - Liga o bot automático\n"
+        "/desligar - Desliga o bot automático\n\n"
+        "*Chat:*\n"
+        "Envie qualquer mensagem para conversar com a IA!",
         parse_mode='Markdown'
     )
 
@@ -1559,18 +1735,209 @@ async def telegram_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg += "Nenhum saldo encontrado ou API desconectada."
         else:
             for coin, amount in balances.items():
-                msg += f"• *{coin}:* {amount:.4f}\n"
+                if amount > 0.0001:  # Só mostra saldos relevantes
+                    msg += f"• *{coin}:* {amount:.4f}\n"
+            
+            # Total em BRL
+            total_brl = lab_state['user_info'].get('total_brl', 0)
+            msg += f"\n📊 *Total em BRL:* R${total_brl:.2f}"
         
         await update.message.reply_text(msg, parse_mode='Markdown')
     except Exception as e:
         await update.message.reply_text(f"❌ Erro ao buscar saldo: {str(e)}")
+
+
+async def telegram_position(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Mostra posição aberta atual."""
+    try:
+        strategy_key = lab_state['selected_strategy']
+        position = lab_state['strategies'][strategy_key].get('position')
+        
+        if not position:
+            await update.message.reply_text("📍 *Nenhuma posição aberta no momento.*\n\nO bot está aguardando oportunidade de compra.", parse_mode='Markdown')
+            return
+        
+        symbol = position.get('symbol', 'N/A')
+        entry_price = position.get('entry_price', 0)
+        qty = position.get('qty', 0)
+        entry_time = position.get('entry_time', 'N/A')
+        
+        # Busca preço atual
+        current_price = lab_state.get('current_price', entry_price)
+        
+        # Calcula lucro
+        profit_pct = ((current_price - entry_price) / entry_price) * 100 if entry_price > 0 else 0
+        profit_usd = (current_price - entry_price) * qty
+        
+        emoji = "📈" if profit_pct > 0 else "📉"
+        
+        msg = f"📍 *POSIÇÃO ABERTA*\n\n"
+        msg += f"🪙 *Moeda:* {symbol}\n"
+        msg += f"💵 *Entrada:* ${entry_price:.4f}\n"
+        msg += f"📊 *Atual:* ${current_price:.4f}\n"
+        msg += f"📦 *Quantidade:* {qty:.4f}\n"
+        msg += f"{emoji} *Lucro:* {profit_pct:+.2f}% (${profit_usd:+.2f})\n"
+        msg += f"🕐 *Desde:* {entry_time[:16] if len(entry_time) > 16 else entry_time}"
+        
+        await update.message.reply_text(msg, parse_mode='Markdown')
+    except Exception as e:
+        await update.message.reply_text(f"❌ Erro: {str(e)}")
+
+
+async def telegram_coins(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Mostra análise de todas as moedas."""
+    try:
+        msg = "🔍 *ANÁLISE DAS MOEDAS*\n\n"
+        
+        diagnostics = lab_state.get('diagnostics', {})
+        market = lab_state.get('market_overview', {})
+        
+        if not market:
+            await update.message.reply_text("⏳ Aguardando dados do mercado...")
+            return
+        
+        opportunities = []
+        
+        for symbol in WATCHLIST:
+            data = market.get(symbol, {})
+            diag = diagnostics.get(symbol, "")
+            
+            if not data:
+                continue
+                
+            price = data.get('price', 0)
+            rsi = data.get('rsi', 0)
+            bb_lower = data.get('bb_lower', 0)
+            
+            # Determina emoji
+            if "COMPRA" in diag:
+                emoji = "🟢"
+                opportunities.append(symbol.replace('/USDT', ''))
+            elif rsi < 40:
+                emoji = "🟡"
+            elif rsi > 70:
+                emoji = "🔴"
+            else:
+                emoji = "⚪"
+            
+            coin = symbol.replace('/USDT', '')
+            msg += f"{emoji} *{coin}*: RSI={rsi:.0f} | ${price:.2f}\n"
+        
+        msg += "\n"
+        if opportunities:
+            msg += f"🚨 *Oportunidades:* {', '.join(opportunities)}"
+        else:
+            msg += "😴 Nenhuma oportunidade agora"
+        
+        await update.message.reply_text(msg, parse_mode='Markdown')
+    except Exception as e:
+        await update.message.reply_text(f"❌ Erro: {str(e)}")
+
+
+async def telegram_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Envia relatório completo."""
+    try:
+        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action='typing')
+        report = generate_market_report()
+        await update.message.reply_text(report, parse_mode='Markdown')
+    except Exception as e:
+        await update.message.reply_text(f"❌ Erro: {str(e)}")
+
+
+async def telegram_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Força compra de uma moeda específica."""
+    try:
+        # Pega o argumento (moeda)
+        args = context.args
+        if not args:
+            await update.message.reply_text("⚠️ Use: /comprar XRP (ou BTC, ETH, etc)")
+            return
+        
+        coin = args[0].upper()
+        symbol = f"{coin}/USDT"
+        
+        # Verifica se é uma moeda válida
+        if symbol not in WATCHLIST:
+            await update.message.reply_text(f"❌ Moeda inválida: {coin}\n\nMoedas disponíveis: XRP, ADA, DOGE, DOT, LINK, LTC, SOL, BNB, ETH, BTC")
+            return
+        
+        await update.message.reply_text(f"⚡ Executando compra de {symbol}...")
+        
+        # Executa a compra
+        if not exchange:
+            await update.message.reply_text("❌ API não conectada!")
+            return
+        
+        ticker = exchange.fetch_ticker(symbol)
+        current_price = ticker['last']
+        
+        # Calcula quantidade
+        amount = min(AMOUNT_INVEST, lab_state.get('real_balance', 0) * 0.95)
+        if amount < MIN_ORDER_VALUE:
+            await update.message.reply_text(f"❌ Saldo insuficiente! Precisa de ${MIN_ORDER_VALUE}, tem ${lab_state.get('real_balance', 0):.2f}")
+            return
+        
+        qty = amount / current_price
+        order = exchange.create_market_buy_order(symbol, qty)
+        
+        # Salva posição
+        strategy_key = lab_state['selected_strategy']
+        lab_state['strategies'][strategy_key]['position'] = {
+            'entry_price': order.get('average', current_price),
+            'qty': order['filled'],
+            'entry_time': datetime.now().isoformat(),
+            'symbol': symbol
+        }
+        save_lab_data()
+        
+        await update.message.reply_text(
+            f"✅ *COMPRA EXECUTADA!*\n\n"
+            f"🪙 {symbol}\n"
+            f"💵 ${order.get('average', current_price):.4f}\n"
+            f"📦 {order['filled']:.4f}",
+            parse_mode='Markdown'
+        )
+        
+    except Exception as e:
+        await update.message.reply_text(f"❌ Erro na compra: {str(e)}")
+
+
+async def telegram_convert(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Converte BRL para USDT."""
+    try:
+        await update.message.reply_text("🔄 Convertendo BRL para USDT...")
+        
+        result = convert_brl_to_usdt(min_brl=10)
+        
+        if result > 0:
+            await update.message.reply_text(f"✅ Conversão concluída!\n\n💰 Saldo USDT: ${result:.2f}")
+        else:
+            await update.message.reply_text("❌ Não foi possível converter. Verifique seu saldo BRL.")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Erro: {str(e)}")
+
+
+async def telegram_start_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Liga o bot automático."""
+    lab_state['running'] = True
+    save_lab_data()
+    await update.message.reply_text("🟢 *Bot LIGADO!*\n\nAgora monitorando o mercado e executando trades automaticamente.", parse_mode='Markdown')
+
+
+async def telegram_stop_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Desliga o bot automático."""
+    lab_state['running'] = False
+    save_lab_data()
+    await update.message.reply_text("🔴 *Bot DESLIGADO!*\n\nO bot parou de monitorar. Use /ligar para reativar.", parse_mode='Markdown')
+
 
 async def telegram_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Responde a mensagens de texto usando GPT com contexto do mercado."""
     user_message = update.message.text
     print(f"📩 Mensagem recebida de {update.effective_user.first_name}: {user_message}")
     
-    if not openai_client:
+    client = get_openai_client()
+    if not client:
         await update.message.reply_text("🧠 IA não configurada no servidor.")
         return
 
@@ -1616,7 +1983,7 @@ async def telegram_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"{market_context}"
         )
         
-        response = openai_client.chat.completions.create(
+        response = client.chat.completions.create(
             model="gpt-3.5-turbo",
             messages=[
                 {"role": "system", "content": system_prompt},
@@ -1660,6 +2027,22 @@ def run_telegram_bot():
         app_bot.add_handler(CommandHandler("status", telegram_status))
         app_bot.add_handler(CommandHandler("saldo", telegram_balance))
         
+        # Novos comandos
+        app_bot.add_handler(CommandHandler("posicao", telegram_position))
+        app_bot.add_handler(CommandHandler("position", telegram_position))
+        app_bot.add_handler(CommandHandler("moedas", telegram_coins))
+        app_bot.add_handler(CommandHandler("coins", telegram_coins))
+        app_bot.add_handler(CommandHandler("relatorio", telegram_report))
+        app_bot.add_handler(CommandHandler("report", telegram_report))
+        app_bot.add_handler(CommandHandler("comprar", telegram_buy))
+        app_bot.add_handler(CommandHandler("buy", telegram_buy))
+        app_bot.add_handler(CommandHandler("converter", telegram_convert))
+        app_bot.add_handler(CommandHandler("convert", telegram_convert))
+        app_bot.add_handler(CommandHandler("ligar", telegram_start_bot))
+        app_bot.add_handler(CommandHandler("on", telegram_start_bot))
+        app_bot.add_handler(CommandHandler("desligar", telegram_stop_bot))
+        app_bot.add_handler(CommandHandler("off", telegram_stop_bot))
+        
         # Handler para mensagens de texto (Chat com GPT)
         app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, telegram_chat))
         
@@ -1688,10 +2071,28 @@ if __name__ == '__main__':
         print(f"Símbolo: {SYMBOL}")
         print("="*60)
         
-        logging.info("Iniciando servidor Flask...")
-        app.run(host='0.0.0.0', debug=False, port=5000, use_reloader=False)
+        print("🌐 Iniciando servidor Flask na porta 5000...")
+        
+        # Flask em thread separada
+        def run_flask():
+            app.run(host='0.0.0.0', debug=False, port=5000, use_reloader=False, threaded=True)
+        
+        flask_thread = threading.Thread(target=run_flask, daemon=True)
+        flask_thread.start()
+        
+        print("✅ Servidor Flask iniciado!")
+        print("🤖 Bot rodando... Pressione Ctrl+C para parar.")
+        
+        # Mantém o processo principal vivo
+        while True:
+            time.sleep(60)
+            
+    except KeyboardInterrupt:
+        print("\n⛔ Servidor interrompido pelo usuário")
     except Exception as e:
         logging.error(f"Erro fatal no main: {e}")
         logging.error(traceback.format_exc())
         print(f"❌ Erro fatal: {e}")
+        import traceback as tb
+        tb.print_exc()
         input("Pressione ENTER para sair...")
