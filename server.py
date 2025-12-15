@@ -389,21 +389,69 @@ def check_and_send_reports():
 
 # ==================== FIM SISTEMA DE RELATÓRIOS ====================
 
+# Controle para não spammar alertas
+_last_opportunity_alert = {}
+
+def send_opportunity_alert(symbol, price, rsi, bb_lower):
+    """Envia alerta de oportunidade antes do gatilho disparar."""
+    global _last_opportunity_alert
+    
+    # Evita spam: só alerta a cada 5 minutos por moeda
+    current_time = time.time()
+    last_alert = _last_opportunity_alert.get(symbol, 0)
+    if current_time - last_alert < 300:  # 5 minutos
+        return
+    
+    _last_opportunity_alert[symbol] = current_time
+    
+    # Calcula distância para a banda
+    dist_to_band = ((price - bb_lower) / bb_lower) * 100
+    
+    # Determina o nível de proximidade
+    if rsi < 35 and dist_to_band <= 1:
+        status = "🟢 SINAL FORTE - Pronto para comprar!"
+    elif rsi < 35:
+        status = f"🟡 RSI OK, preço {dist_to_band:.1f}% acima da banda"
+    elif dist_to_band <= 1:
+        status = f"🟡 Preço OK, RSI={rsi:.1f} (precisa <35)"
+    else:
+        status = f"⏳ Quase... RSI={rsi:.1f} | {dist_to_band:.1f}% da banda"
+    
+    msg = (
+        f"👀 *OPORTUNIDADE DETECTADA*\n\n"
+        f"🪙 {symbol}\n"
+        f"💵 Preço: ${price:.4f}\n"
+        f"📊 RSI: {rsi:.1f}\n"
+        f"📉 Banda Inferior: ${bb_lower:.4f}\n"
+        f"📏 Distância: {dist_to_band:.1f}%\n\n"
+        f"{status}"
+    )
+    
+    print(f"👀 Oportunidade: {symbol} | RSI={rsi:.1f} | Dist={dist_to_band:.1f}%")
+    send_telegram_message(msg)
+
+
 def analyze_market_with_gpt(symbol, price, rsi, bb_lower, action_type):
     """Usa GPT para analisar o contexto do trade."""
     client = get_openai_client()
     if not client:
         return "🤖 IA não configurada."
 
+    # Calcula distância do preço para a banda inferior
+    dist_to_band = ((price - bb_lower) / bb_lower) * 100
+    
     prompt = f"""
     Você é um analista de trading sênior.
     Ação: {action_type} em {symbol}
-    Preço Atual: {price}
+    Preço Atual: ${price:.4f}
     RSI (14): {rsi:.2f}
-    Bandas de Bollinger (Lower): {bb_lower:.2f}
+    Banda Inferior: ${bb_lower:.4f}
+    Distância para banda: {dist_to_band:.1f}%
     
-    Analise brevemente (máximo 2 frases) se esta operação faz sentido técnico com base no RSI e Bollinger.
-    Seja direto e use emojis.
+    Analise brevemente (máximo 2 frases) se esta operação faz sentido.
+    - Se RSI < 35 e preço na banda (dist < 1%), diga: 🟢 Compra segura — sinal forte.
+    - Se está perto mas não lá, diga: ⏳ Quase... falta X% para a banda ou RSI precisa cair.
+    - Senão: ⚠️ Espera, mercado ainda não caiu o suficiente.
     """
 
     try:
@@ -970,6 +1018,11 @@ def trading_loop():
             for current_symbol in target_coins:
                 # 1. Busca dados de mercado (agora inclui banda superior)
                 price, rsi, bb_lower, bb_upper = fetch_market_data(current_symbol)
+                
+                # Alerta precoce — avisa antes de apertar o gatilho
+                if price is not None and rsi is not None and bb_lower is not None:
+                    if rsi < 40 and price <= bb_lower * 1.02:  # até 2% acima da banda
+                        send_opportunity_alert(current_symbol, price, rsi, bb_lower)
 
                 if price is not None:
                     lab_state['current_price'] = price
