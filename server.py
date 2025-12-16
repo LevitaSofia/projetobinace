@@ -57,6 +57,14 @@ SYMBOL = os.getenv('SYMBOL', 'BTC/USDT')
 AMOUNT_INVEST = float(os.getenv('AMOUNT_INVEST', 11.0))
 FEE_RATE = 0.001  # 0.1%
 
+# Parâmetros de estratégia AJUSTÁVEIS pela IA
+STRATEGY_PARAMS = {
+    'RSI_TARGET': 35,        # RSI para compra
+    'TOLERANCE': 0.01,       # Tolerância da banda (1%)
+    'STOP_LOSS': -3.0,       # Stop loss em %
+    'TAKE_PROFIT': 5.0,      # Take profit em %
+}
+
 # Configuração OpenAI (inicialização lazy para evitar bloqueio SSL)
 openai_client = None
 _openai_initialized = False
@@ -432,38 +440,84 @@ def send_opportunity_alert(symbol, price, rsi, bb_lower):
 
 
 def analyze_market_with_gpt(symbol, price, rsi, bb_lower, action_type):
-    """Usa GPT para analisar o contexto do trade."""
+    """IA que analisa histórico e ajusta estratégia automaticamente."""
+    global STRATEGY_PARAMS
+    
     client = get_openai_client()
     if not client:
         return "🤖 IA não configurada."
 
-    # Calcula distância do preço para a banda inferior
-    dist_to_band = ((price - bb_lower) / bb_lower) * 100
+    # Coleta histórico de trades para análise
+    selected = lab_state['selected_strategy']
+    trades = lab_state['strategies'][selected].get('trades', [])
     
-    prompt = f"""
-    Você é um analista de trading sênior.
-    Ação: {action_type} em {symbol}
-    Preço Atual: ${price:.4f}
-    RSI (14): {rsi:.2f}
-    Banda Inferior: ${bb_lower:.4f}
-    Distância para banda: {dist_to_band:.1f}%
+    # Analisa últimos 5 trades
+    ultimos_trades = trades[-5:] if len(trades) >= 5 else trades
+    trades_perdidos = [t for t in ultimos_trades if t.get('profit_pct', 0) < -2]
+    trades_ganhos = [t for t in ultimos_trades if t.get('profit_pct', 0) > 0]
     
-    Analise brevemente (máximo 2 frases) se esta operação faz sentido.
-    - Se RSI < 35 e preço na banda (dist < 1%), diga: 🟢 Compra segura — sinal forte.
-    - Se está perto mas não lá, diga: ⏳ Quase... falta X% para a banda ou RSI precisa cair.
-    - Senão: ⚠️ Espera, mercado ainda não caiu o suficiente.
-    """
+    # Calcula RSI médio das operações
+    rsi_medio = sum([t.get('rsi', 35) for t in ultimos_trades]) / len(ultimos_trades) if ultimos_trades else 35
+    
+    # Contexto do mercado atual
+    market_context = f"RSI atual={rsi:.1f}, preço=${price:.2f}, banda=${bb_lower:.2f}"
+    
+    # Parâmetros atuais
+    params_atuais = f"RSI_TARGET={STRATEGY_PARAMS['RSI_TARGET']}, STOP={STRATEGY_PARAMS['STOP_LOSS']}%"
+    
+    prompt = f"""Você é chefe de estratégia agora, olha o último ciclo:
+- Últimos 5 trades: {len(trades_perdidos)} perdidos acima de 2%, {len(trades_ganhos)} ganhos, RSI médio foi {rsi_medio:.1f}.
+- Mercado: {market_context}
+- Parâmetros atuais: {params_atuais}
+
+Regras:
+- Se perdeu 2 ou mais seguidos: diminui RSI pra 32, aumenta tolerância pra 0.5%, stop loss pra -2.5%.
+- Se ganhou fácil em RSI <35: mantém tudo, só diz 'segura firme'.
+- Se RSI >70 por 3 dias: vira conservadora — RSI 38, venda no primeiro 2%.
+
+Responde EXATAMENTE assim (duas linhas):
+Ação: ajuste ou mantém
+Telegram: uma frase curta tipo 'IA mudou o plano — agora mais esperta'
+
+Nada de enrolação."""
 
     try:
         response = client.chat.completions.create(
             model="gpt-3.5-turbo",
             messages=[
-                {"role": "system", "content": "Você é um assistente de trading cripto conciso."},
+                {"role": "system", "content": "Você é um gestor de risco de trading. Responda APENAS no formato pedido."},
                 {"role": "user", "content": prompt}
             ],
             max_tokens=100
         )
-        return response.choices[0].message.content.strip()
+        
+        content = response.choices[0].message.content.strip()
+        res = content.split('\n')
+        
+        # Parse da resposta
+        acao = ""
+        telegram_msg = ""
+        
+        for line in res:
+            if line.lower().startswith('ação:') or line.lower().startswith('acao:'):
+                acao = line.split(':', 1)[1].strip() if ':' in line else ''
+            elif line.lower().startswith('telegram:'):
+                telegram_msg = line.split(':', 1)[1].strip() if ':' in line else ''
+        
+        # Aplica ajustes se necessário
+        if 'ajuste' in acao.lower() or 'ajustar' in acao.lower():
+            STRATEGY_PARAMS['RSI_TARGET'] = 32
+            STRATEGY_PARAMS['TOLERANCE'] = 0.005
+            STRATEGY_PARAMS['STOP_LOSS'] = -2.5
+            
+            print(f"🤖 IA AJUSTOU ESTRATÉGIA: RSI={STRATEGY_PARAMS['RSI_TARGET']}, Stop={STRATEGY_PARAMS['STOP_LOSS']}%")
+            send_telegram_message(f"🤖 *IA ajustou estratégia*\\n\\n{telegram_msg}\\n\\nNovos params: RSI<{STRATEGY_PARAMS['RSI_TARGET']}, Stop {STRATEGY_PARAMS['STOP_LOSS']}%")
+        else:
+            if telegram_msg:
+                send_telegram_message(f"🟢 {telegram_msg}")
+        
+        return content
+        
     except Exception as e:
         print(f"❌ Erro GPT: {e}")
         return "🤖 Erro na análise de IA."
@@ -512,26 +566,24 @@ def fetch_market_data(symbol):
 
 
 def check_strategy_signal(strategy_name, price, rsi, bb_lower):
-    """Verifica se dá sinal de compra (Trading Real EQUILIBRADO)."""
-    # ESTRATÉGIA EQUILIBRADA para R$300
-    # Exige: RSI < 35 E preço na banda inferior
-    # Bom equilíbrio entre segurança e oportunidades
+    """Verifica se dá sinal de compra - USA PARÂMETROS DINÂMICOS DA IA."""
+    # Pega parâmetros ajustáveis (podem ser modificados pela IA)
+    rsi_target = STRATEGY_PARAMS['RSI_TARGET']
+    tolerance_pct = STRATEGY_PARAMS['TOLERANCE']
     
-    tolerance = bb_lower * 0.01  # 1% de tolerância
+    tolerance = bb_lower * tolerance_pct
     
-    # CONDIÇÃO 1: RSI baixo (< 35 = sobrevenda)
-    rsi_low = rsi < 35
+    # CONDIÇÃO 1: RSI baixo
+    rsi_low = rsi < rsi_target
     
     # CONDIÇÃO 2: Preço DEVE estar na banda inferior ou abaixo
     price_at_bottom = price <= bb_lower + tolerance
     
     # SÓ COMPRA SE AMBAS AS CONDIÇÕES FOREM VERDADEIRAS
-    # RSI baixo + preço na banda = boa entrada
-    
     should_buy = rsi_low and price_at_bottom
     
     if should_buy:
-        print(f"🎯 SINAL DE COMPRA: RSI={rsi:.1f} (<35) + Preço na banda inferior!")
+        print(f"🎯 SINAL DE COMPRA: RSI={rsi:.1f} (<{rsi_target}) + Preço na banda inferior!")
     
     return should_buy
 
@@ -626,11 +678,11 @@ def check_exit_signal(entry_price, current_price, rsi, bb_upper=None):
         should_sell = True
         reason.append(f"🔴 BANDA SUPERIOR + Lucro {profit_pct:.1f}%")
     
-    # === STOP LOSS (só em perda GRAVE) ===
-    # Mais tolerante: -3% para dar chance de recuperar
-    if profit_pct <= -3.0:
+    # === STOP LOSS (usa parâmetro dinâmico da IA) ===
+    stop_loss = STRATEGY_PARAMS['STOP_LOSS']
+    if profit_pct <= stop_loss:
         should_sell = True
-        reason.append(f"🛑 STOP LOSS {profit_pct:.1f}% - Cortando perdas")
+        reason.append(f"🛑 STOP LOSS {profit_pct:.1f}% (limite: {stop_loss}%)")
     
     # === STOP LOSS DE EMERGÊNCIA ===
     # Se perdendo muito, vende independente de RSI
@@ -643,7 +695,7 @@ def check_exit_signal(entry_price, current_price, rsi, bb_upper=None):
     else:
         # Log para debug quando NÃO vende
         if profit_pct < 0:
-            print(f"⏳ Aguardando: Prejuízo {profit_pct:.1f}% (Stop em -3%) | RSI={rsi:.1f}")
+            print(f"⏳ Aguardando: Prejuízo {profit_pct:.1f}% (Stop em {stop_loss}%) | RSI={rsi:.1f}")
         elif profit_pct > 0 and profit_pct < 1.5:
             print(f"⏳ Aguardando: Lucro {profit_pct:.1f}% (Meta mínima 1.5%) | RSI={rsi:.1f}")
     
@@ -772,7 +824,9 @@ def execute_real_trade(action, price, symbol):
                 'price': buy_price,
                 'qty': buy_qty,
                 'order_id': order['id'],
-                'mode': 'REAL'
+                'mode': 'REAL',
+                'rsi': rsi,  # Salva RSI para análise da IA
+                'profit_pct': 0  # Será atualizado na venda
             }
             strategy['trades'].append(trade)
             # Salva o símbolo na posição para saber o que vender depois
@@ -864,6 +918,10 @@ def execute_real_trade(action, price, symbol):
                 
                 order = exchange.create_market_sell_order(symbol, qty)
                 
+                # Aguarda Binance processar a ordem e atualiza saldo
+                print("⏳ Aguardando confirmação da Binance...")
+                time.sleep(5)
+                
                 # Salva dados da posição ANTES de limpar
                 entry_price = strategy['position']['entry_price'] if strategy.get('position') else price
                 entry_qty = strategy['position'].get('qty', qty) if strategy.get('position') else qty
@@ -873,6 +931,17 @@ def execute_real_trade(action, price, symbol):
                 profit_pct = ((sell_price - entry_price) / entry_price) * 100 if entry_price > 0 else 0
                 profit_usdt = (sell_price - entry_price) * order['filled']
                 rsi = lab_state['indicators']['rsi']
+                
+                # Confirma saldo atualizado (com fallback local)
+                try:
+                    balance = exchange.fetch_balance()
+                    lab_state['real_balance'] = balance['total'].get('USDT', 0.0)
+                    print(f"✅ Saldo confirmado: ${lab_state['real_balance']:.2f} USDT")
+                except Exception as e:
+                    # Fallback: calcula saldo local
+                    usdt_recebido = sell_price * order['filled']
+                    lab_state['real_balance'] = lab_state.get('real_balance', 0) + usdt_recebido
+                    print(f"⚠️ Erro Binance: {e} | Saldo estimado: ${lab_state['real_balance']:.2f} USDT")
 
                 trade = {
                     'time': datetime.now().strftime('%H:%M:%S'),
@@ -883,7 +952,8 @@ def execute_real_trade(action, price, symbol):
                     'mode': 'REAL',
                     'entry_price': entry_price,  # Salva preço de compra
                     'profit_pct': profit_pct,    # Salva % lucro
-                    'profit_usdt': profit_usdt   # Salva lucro em USDT
+                    'profit_usdt': profit_usdt,  # Salva lucro em USDT
+                    'rsi': rsi  # Salva RSI para análise da IA
                 }
                 strategy['trades'].append(trade)
                 strategy['position'] = None # Limpa posição
@@ -1093,7 +1163,8 @@ def trading_loop():
                                     print(f"📍 POSIÇÃO ATIVA: {pos_symbol} | Entrada: ${entry_price:.2f} | Atual: ${price:.2f} | Lucro: {profit_pct:+.2f}%")
                                     
                                     # LOG DETALHADO antes de verificar venda
-                                    print(f"🔍 [DEBUG] Verificando saída: RSI={rsi:.1f} | Lucro={profit_pct:.2f}% | BB_Upper=${bb_upper:.2f if bb_upper else 0}")
+                                    bb_display = f"${bb_upper:.2f}" if bb_upper else "$0"
+                                    print(f"🔍 [DEBUG] Verificando saída: RSI={rsi:.1f} | Lucro={profit_pct:.2f}% | BB_Upper={bb_display}")
                                     
                                     should_sell = check_exit_signal(entry_price, price, rsi, bb_upper)
                                     
@@ -1105,7 +1176,7 @@ def trading_loop():
                                         print(f"   Atual: ${price:.4f}")
                                         print(f"   Lucro: {profit_pct:+.2f}%")
                                         print(f"   RSI: {rsi:.1f}")
-                                        print(f"   BB Upper: ${bb_upper:.2f if bb_upper else 0}")
+                                        print(f"   BB Upper: {bb_display}")
                                         
                                         # Envia alerta Telegram ANTES de executar
                                         send_telegram_message(
@@ -1118,6 +1189,14 @@ def trading_loop():
                                         )
                                         
                                         execute_real_trade('sell', price, current_symbol)
+                                        
+                                        # Espera Binance processar antes de chamar IA
+                                        print("⏳ Aguardando Binance estabilizar...")
+                                        time.sleep(10)
+                                        
+                                        # IA analisa após a venda e ajusta estratégia se necessário
+                                        print("🤖 IA analisando resultado para ajustar estratégia...")
+                                        analyze_market_with_gpt(current_symbol, price, rsi, bb_lower, 'sell')
 
                 else:
                     lab_state['status'] = 'Em Standby (Monitorando...) zzz'
@@ -1752,7 +1831,8 @@ async def telegram_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/saldo - Mostra seu saldo em BRL e USDT\n"
         "/posicao - Mostra posição aberta (se houver)\n"
         "/moedas - Análise de todas as 10 moedas\n"
-        "/relatorio - Relatório completo do mercado\n\n"
+        "/relatorio - Relatório completo do mercado\n"
+        "/ia - Parâmetros da IA (reset para resetar)\n\n"
         "*Ações:*\n"
         "/comprar XRP - Força compra de uma moeda\n"
         "/converter - Converte BRL para USDT\n"
@@ -1941,6 +2021,15 @@ async def telegram_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'entry_time': datetime.now().isoformat(),
             'symbol': symbol
         }
+        
+        # Aguarda Binance refletir a ordem
+        time.sleep(3)
+        
+        # Atualiza saldo real (subtrai USDT gasto)
+        usdt_gasto = order.get('average', current_price) * order['filled']
+        lab_state['real_balance'] = max(0, lab_state.get('real_balance', 0) - usdt_gasto)
+        print(f"💸 Gasto: ${usdt_gasto:.2f} USDT | Saldo restante: ${lab_state['real_balance']:.2f}")
+        
         save_lab_data()
         
         await update.message.reply_text(
@@ -1982,6 +2071,41 @@ async def telegram_stop_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lab_state['running'] = False
     save_lab_data()
     await update.message.reply_text("🔴 *Bot DESLIGADO!*\n\nO bot parou de monitorar. Use /ligar para reativar.", parse_mode='Markdown')
+
+
+async def telegram_ia(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Mostra parâmetros da IA ou reseta para padrão."""
+    global STRATEGY_PARAMS
+    
+    args = context.args if context.args else []
+    
+    if args and args[0].lower() == 'reset':
+        # Reseta para valores padrão
+        STRATEGY_PARAMS = {
+            'RSI_TARGET': 35,
+            'TOLERANCE': 0.01,
+            'STOP_LOSS': -3.0,
+            'TAKE_PROFIT': 5.0,
+        }
+        await update.message.reply_text(
+            "🔄 *Parâmetros resetados!*\n\n"
+            f"📊 RSI Target: {STRATEGY_PARAMS['RSI_TARGET']}\n"
+            f"📏 Tolerância: {STRATEGY_PARAMS['TOLERANCE']*100:.1f}%\n"
+            f"🛑 Stop Loss: {STRATEGY_PARAMS['STOP_LOSS']}%\n"
+            f"🎯 Take Profit: {STRATEGY_PARAMS['TAKE_PROFIT']}%",
+            parse_mode='Markdown'
+        )
+    else:
+        # Mostra parâmetros atuais
+        await update.message.reply_text(
+            "🤖 *Parâmetros da IA*\n\n"
+            f"📊 RSI Target: `{STRATEGY_PARAMS['RSI_TARGET']}`\n"
+            f"📏 Tolerância: `{STRATEGY_PARAMS['TOLERANCE']*100:.1f}%`\n"
+            f"🛑 Stop Loss: `{STRATEGY_PARAMS['STOP_LOSS']}%`\n"
+            f"🎯 Take Profit: `{STRATEGY_PARAMS['TAKE_PROFIT']}%`\n\n"
+            "💡 Use `/ia reset` para voltar aos valores padrão.",
+            parse_mode='Markdown'
+        )
 
 
 async def telegram_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2095,6 +2219,8 @@ def run_telegram_bot():
         app_bot.add_handler(CommandHandler("on", telegram_start_bot))
         app_bot.add_handler(CommandHandler("desligar", telegram_stop_bot))
         app_bot.add_handler(CommandHandler("off", telegram_stop_bot))
+        app_bot.add_handler(CommandHandler("ia", telegram_ia))
+        app_bot.add_handler(CommandHandler("ai", telegram_ia))
         
         # Handler para mensagens de texto (Chat com GPT)
         app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, telegram_chat))
