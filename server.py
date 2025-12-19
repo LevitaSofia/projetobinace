@@ -788,23 +788,27 @@ def execute_real_trade(action, price, symbol):
         strategy = lab_state['strategies'][strategy_key]
 
         if action == 'buy':
-            # VERIFICAÇÃO DE SALDO ANTES DE COMPRAR
-            usdt_balance = lab_state.get('real_balance', 0.0)
+            # BUSCA SALDO REAL DA BINANCE (não usa cache)
+            balance = exchange.fetch_balance()
+            usdt_balance = balance['USDT']['free']
+            print(f"💳 Saldo REAL da Binance: ${usdt_balance:.2f} USDT")
+            lab_state['real_balance'] = usdt_balance  # Atualiza cache
             
             # Se não tem USDT suficiente, tenta converter BRL para USDT
-            if usdt_balance < MIN_ORDER_VALUE:
+            if usdt_balance < 10.5:  # Margem pra taxa
                 print(f"⚠️ Saldo USDT baixo (${usdt_balance:.2f}). Tentando converter BRL...")
                 usdt_balance = convert_brl_to_usdt()
                 
                 # Se ainda não tem saldo após conversão - apenas loga, não envia Telegram repetido
-                if usdt_balance < MIN_ORDER_VALUE:
-                    print(f"⚠️ Saldo insuficiente: ${usdt_balance:.2f} < ${MIN_ORDER_VALUE}")
+                if usdt_balance < 10.5:
+                    print(f"⚠️ Saldo insuficiente: ${usdt_balance:.2f} < $11.00")
                     return False
             
             # Usa o valor disponível (máximo de AMOUNT_INVEST ou saldo disponível)
             invest_amount = min(AMOUNT_INVEST, usdt_balance * 0.95)  # 95% para taxa
+            print(f"💰 AMOUNT_INVEST={AMOUNT_INVEST}, usdt_balance*0.95={usdt_balance * 0.95:.2f}, invest_amount={invest_amount:.2f}")
             
-            if invest_amount < MIN_ORDER_VALUE:
+            if invest_amount < 10.5:  # Margem pra taxa
                 print(f"⚠️ Valor de investimento muito baixo: ${invest_amount:.2f}")
                 return False
             
@@ -1139,20 +1143,41 @@ def trading_loop():
 
                             if strategy['position'] is None:
                                 # Sem posição - procura oportunidades de COMPRA
-                                tolerance = bb_lower * 0.01  # 1% de tolerância (igual check_strategy_signal)
-                                price_ok = price <= bb_lower + tolerance
-                                rsi_ok = rsi < 45
-                                signal = check_strategy_signal(selected, price, rsi, bb_lower)
+                                rsi_target = STRATEGY_PARAMS['RSI_TARGET']
+                                tolerance_pct = STRATEGY_PARAMS['TOLERANCE']
+                                tolerance = bb_lower * tolerance_pct
+                                price_limit = bb_lower + tolerance
                                 
-                                # Mostra debug para TODAS moedas com RSI < 45
-                                if rsi_ok:
-                                    print(f"📊 {current_symbol} | RSI={rsi:.1f}✅ | Preço=${price:.2f} | BB=${bb_lower:.2f} | Limite=${bb_lower + tolerance:.2f} | PrçOK={price_ok} | SINAL={signal}")
+                                # Verifica cada condição
+                                rsi_ok = rsi < rsi_target
+                                price_ok = price <= price_limit
+                                saldo_ok = current_balance >= 10.5
+                                
+                                signal = rsi_ok and price_ok and saldo_ok
+                                
+                                # Mostra debug para moedas promissoras (RSI < 45)
+                                if rsi < 45:
+                                    print(f"📊 {current_symbol} | RSI={rsi:.1f}{'✅' if rsi_ok else '❌'} | Preço=${price:.2f} | Limite=${price_limit:.2f} {'✅' if price_ok else '❌'} | Saldo=${current_balance:.2f} {'✅' if saldo_ok else '❌'}")
                                 
                                 if signal:
                                     print(f"🎯 SINAL DE COMPRA DETECTADO para {current_symbol}!")
                                     result = execute_real_trade('buy', price, current_symbol)
                                     if result:
                                         break # Sai do loop de moedas após compra bem-sucedida
+                                elif rsi < 45:
+                                    # Explica por que NÃO comprou (só pra moedas promissoras)
+                                    motivos = []
+                                    if not rsi_ok:
+                                        motivos.append(f"RSI={rsi:.1f} (precisa <{rsi_target})")
+                                    if not price_ok:
+                                        dist = ((price - price_limit) / price_limit) * 100
+                                        motivos.append(f"Preço ${price:.4f} > limite ${price_limit:.4f} (+{dist:.1f}%)")
+                                    if not saldo_ok:
+                                        motivos.append(f"Saldo ${current_balance:.2f} < $11 (converte BRL?)")
+                                    
+                                    # Só envia Telegram se tiver motivo relevante (evita spam)
+                                    if motivos and rsi < 40:  # RSI < 40 = quase comprando
+                                        send_telegram_message(f"⏸️ *{current_symbol}* — não comprou\\n" + "\\n".join(motivos))
                             else:
                                 # TEM POSIÇÃO - verifica VENDA
                                 pos_symbol = strategy['position'].get('symbol', SYMBOL)
@@ -2001,17 +2026,26 @@ async def telegram_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ API não conectada!")
             return
         
+        # Busca saldo REAL da Binance (não usa cache)
+        balance = exchange.fetch_balance()
+        usdt_balance = balance['USDT']['free']
+        lab_state['real_balance'] = usdt_balance  # Atualiza cache
+        
         ticker = exchange.fetch_ticker(symbol)
         current_price = ticker['last']
         
         # Calcula quantidade
-        amount = min(AMOUNT_INVEST, lab_state.get('real_balance', 0) * 0.95)
-        if amount < MIN_ORDER_VALUE:
-            await update.message.reply_text(f"❌ Saldo insuficiente! Precisa de ${MIN_ORDER_VALUE}, tem ${lab_state.get('real_balance', 0):.2f}")
+        amount = min(AMOUNT_INVEST, usdt_balance * 0.95)
+        if usdt_balance < 10.5:  # Margem pra taxa
+            await update.message.reply_text(f"❌ Saldo insuficiente! Precisa de $11.00, tem ${usdt_balance:.2f}")
             return
         
         qty = amount / current_price
         order = exchange.create_market_buy_order(symbol, qty)
+        
+        # Atualiza saldo com valor REAL gasto
+        usdt_gasto = order.get('cost', amount)
+        lab_state['real_balance'] = usdt_balance - usdt_gasto
         
         # Salva posição
         strategy_key = lab_state['selected_strategy']
@@ -2025,9 +2059,13 @@ async def telegram_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Aguarda Binance refletir a ordem
         time.sleep(3)
         
-        # Atualiza saldo real (subtrai USDT gasto)
-        usdt_gasto = order.get('average', current_price) * order['filled']
-        lab_state['real_balance'] = max(0, lab_state.get('real_balance', 0) - usdt_gasto)
+        # Busca saldo atualizado da Binance
+        try:
+            balance = exchange.fetch_balance()
+            lab_state['real_balance'] = balance['USDT']['free']
+        except:
+            pass  # Já atualizou antes
+        
         print(f"💸 Gasto: ${usdt_gasto:.2f} USDT | Saldo restante: ${lab_state['real_balance']:.2f}")
         
         save_lab_data()
