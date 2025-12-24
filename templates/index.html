@@ -1,745 +1,637 @@
 <!DOCTYPE html>
-<html lang="pt-br">
+<html lang="pt-BR">
 
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>🏗️ Laboratório de Trading Híbrido</title>
+    <title>CYBERPUNK TRADER TERMINAL</title>
+
+    <!-- Bootstrap 5 & Icons -->
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css">
+
+    <!-- Google Fonts (Orbitron para vibe Cyberpunk) -->
+    <link
+        href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&family=Roboto+Mono:wght@300;400;700&display=swap"
+        rel="stylesheet">
+
+    <!-- Lightweight Charts (TradingView) -->
+    <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+
     <style>
         :root {
-            --dark-bg: #0d1117;
-            --card-bg: #161b22;
-            --border: #30363d;
-            --yellow: #fcd535;
-            --green: #0ecb81;
-            --red: #f6465d;
-            --text: #e6edf3;
+            --bg-color: #050505;
+            --card-bg: #0a0a0a;
+            --text-primary: #00ff41;
+            /* Matrix Green */
+            --text-secondary: #008f11;
+            --accent-color: #00ff41;
+            --danger-color: #ff003c;
+            /* Cyberpunk Red */
+            --warning-color: #fcee0a;
+            /* Cyberpunk Yellow */
+            --border-color: #1a1a1a;
+            --glow: 0 0 10px rgba(0, 255, 65, 0.3);
         }
 
         body {
-            background-color: var(--dark-bg);
-            color: var(--text);
-            font-family: 'Inter', sans-serif;
-            padding: 20px;
+            background-color: var(--bg-color);
+            color: var(--text-primary);
+            font-family: 'Roboto Mono', monospace;
+            overflow-x: hidden;
         }
 
-        .text-muted {
-            color: #8b949e !important;
+        h1,
+        h2,
+        h3,
+        h4,
+        h5,
+        h6,
+        .cyber-font {
+            font-family: 'Orbitron', sans-serif;
+            text-transform: uppercase;
+            letter-spacing: 2px;
         }
 
+        /* Scrollbar Customizada */
+        ::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: var(--bg-color);
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: var(--text-secondary);
+            border-radius: 4px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: var(--text-primary);
+        }
+
+        /* Cards Cyberpunk */
         .card {
             background-color: var(--card-bg);
-            border: 1px solid var(--border);
-            border-radius: 12px;
-            padding: 20px;
+            border: 1px solid var(--border-color);
+            border-radius: 0;
+            box-shadow: 0 0 15px rgba(0, 0, 0, 0.5);
             margin-bottom: 20px;
-            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
-        }
-
-        .card-header-custom {
-            font-size: 1.1rem;
-            font-weight: 600;
-            margin-bottom: 15px;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }
-
-        .balance-large {
-            font-size: 2.5rem;
-            font-weight: bold;
-            color: var(--yellow);
-        }
-
-        .profit-positive {
-            color: var(--green);
-        }
-
-        .profit-negative {
-            color: var(--red);
-        }
-
-        .strategy-card {
             position: relative;
-            transition: all 0.3s ease;
+            overflow: hidden;
         }
 
-        .strategy-card:hover {
-            transform: translateY(-5px);
-            box-shadow: 0 8px 12px rgba(0, 0, 0, 0.4);
+        .card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 2px;
+            background: linear-gradient(90deg, transparent, var(--accent-color), transparent);
+            animation: scanline 3s linear infinite;
         }
 
-        .strategy-card.selected {
-            border: 2px solid var(--yellow);
+        @keyframes scanline {
+            0% {
+                transform: translateX(-100%);
+            }
+
+            100% {
+                transform: translateX(100%);
+            }
         }
 
-        .radio-custom {
-            width: 20px;
-            height: 20px;
-            cursor: pointer;
+        .card-header {
+            background-color: rgba(0, 255, 65, 0.05);
+            border-bottom: 1px solid var(--border-color);
+            font-weight: bold;
+            color: var(--accent-color);
         }
 
-        .switch-large {
-            transform: scale(1.5);
-            margin-left: 10px;
+        /* Status Badges */
+        .badge-cyber {
+            background-color: rgba(0, 255, 65, 0.1);
+            border: 1px solid var(--accent-color);
+            color: var(--accent-color);
+            box-shadow: var(--glow);
         }
 
-        .live-indicator {
-            width: 12px;
-            height: 12px;
-            border-radius: 50%;
-            display: inline-block;
-            margin-right: 8px;
+        .badge-danger-cyber {
+            background-color: rgba(255, 0, 60, 0.1);
+            border: 1px solid var(--danger-color);
+            color: var(--danger-color);
+            box-shadow: 0 0 10px rgba(255, 0, 60, 0.3);
         }
 
-        .live-indicator.active {
-            background-color: var(--green);
-            box-shadow: 0 0 10px var(--green);
+        /* Tabela Cyberpunk */
+        .table-cyber {
+            color: var(--text-primary);
+            border-color: var(--border-color);
         }
 
-        .live-indicator.inactive {
-            background-color: var(--border);
+        .table-cyber th {
+            background-color: rgba(0, 255, 65, 0.05);
+            border-color: var(--border-color);
+            color: var(--accent-color);
         }
 
-        .trade-list {
-            max-height: 200px;
+        .table-cyber td {
+            background-color: transparent;
+            border-color: var(--border-color);
+        }
+
+        .table-cyber tr:hover td {
+            background-color: rgba(0, 255, 65, 0.05);
+            color: #fff;
+        }
+
+        /* Botões */
+        .btn-cyber {
+            background: transparent;
+            border: 1px solid var(--accent-color);
+            color: var(--accent-color);
+            text-transform: uppercase;
+            transition: all 0.3s;
+            font-family: 'Orbitron', sans-serif;
+        }
+
+        .btn-cyber:hover {
+            background: var(--accent-color);
+            color: #000;
+            box-shadow: var(--glow);
+        }
+
+        /* Chart Container */
+        #chart-container {
+            width: 100%;
+            height: 400px;
+            border: 1px solid var(--border-color);
+            background: var(--card-bg);
+        }
+
+        /* Logs Terminal */
+        #logs-container {
+            height: 300px;
             overflow-y: auto;
-            font-size: 0.85rem;
+            background-color: #000;
+            border: 1px solid var(--border-color);
+            padding: 10px;
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 0.9rem;
+            color: #ccc;
         }
 
-        .trade-item {
-            padding: 8px;
-            margin: 4px 0;
-            background-color: var(--dark-bg);
-            border-radius: 6px;
+        .log-entry {
+            margin-bottom: 5px;
+            border-bottom: 1px solid #111;
+            padding-bottom: 2px;
+        }
+
+        .log-time {
+            color: var(--text-secondary);
+            margin-right: 10px;
+        }
+
+        .log-info {
+            color: #4facfe;
+        }
+
+        .log-warning {
+            color: var(--warning-color);
+        }
+
+        .log-error {
+            color: var(--danger-color);
+        }
+
+        .log-success {
+            color: var(--accent-color);
+        }
+
+        /* Navbar */
+        .navbar-cyber {
+            background-color: rgba(10, 10, 10, 0.95);
+            border-bottom: 1px solid var(--accent-color);
+            box-shadow: 0 0 20px rgba(0, 255, 65, 0.1);
+        }
+
+        .navbar-brand {
+            color: var(--accent-color) !important;
+            font-weight: bold;
+            text-shadow: var(--glow);
         }
     </style>
 </head>
 
 <body>
-    <div class="container-fluid">
-        <!-- Header -->
-        <div class="row mb-4">
-            <div class="col-12">
-                <div class="d-flex justify-content-between align-items-center mb-2">
-                    <div></div>
-                    <h1 class="text-center mb-0">
-                        <i class="fas fa-flask"></i> Laboratório de Trading Híbrido
-                    </h1>
-                    <a href="/charts" class="btn btn-outline-warning btn-lg">
-                        <i class="fas fa-chart-line"></i> Ver Gráficos
-                    </a>
-                </div>
-                <p class="text-center text-muted">
-                    Testando 3 estratégias simultaneamente | Preço BTC: $<span id="current-price">0.00</span> |
-                    Atualizado: <span id="last-update">--:--:--</span> | Status: <span id="system-status" class="badge bg-secondary">---</span>
-                </p>
+
+    <!-- Navbar -->
+    <nav class="navbar navbar-expand-lg navbar-cyber sticky-top mb-4">
+        <div class="container-fluid">
+            <a class="navbar-brand cyber-font" href="#">
+                <i class="bi bi-cpu-fill"></i> SYSTEM_OVERRIDE_V2
+            </a>
+            <div class="d-flex align-items-center">
+                <span class="badge badge-cyber me-3" id="server-status">
+                    <i class="bi bi-activity"></i> ONLINE
+                </span>
+                <span class="text-muted small" id="last-update">--:--:--</span>
             </div>
         </div>
+    </nav>
 
-        <!-- Master Control -->
-        <div class="row mb-4">
-            <div class="col-12">
-                <div class="card text-center border-warning">
-                    <div class="card-body">
-                        <h3 class="card-title mb-3">🎛️ Painel de Controle Mestre</h3>
-                        <div class="d-flex justify-content-center gap-4 align-items-center">
-                            
-                            <!-- Botão Ligar/Desligar -->
-                            <button id="btn-running" class="btn btn-secondary btn-lg px-5 py-3 fw-bold" onclick="toggleRunning()">
-                                <i class="fas fa-power-off"></i> INICIAR SISTEMA
-                            </button>
+    <div class="container-fluid px-4">
 
-                            <div class="vr bg-secondary"></div>
+        <!-- Dashboard Grid -->
+        <div class="row g-4">
 
-                            <!-- Chave Modo Real -->
-                            <div class="d-flex flex-column align-items-center">
-                                <span class="mb-2 fw-bold text-danger">⚠️ MODO REAL (DINHEIRO)</span>
-                                <label class="switch-large">
-                                    <input type="checkbox" id="live-toggle" onchange="toggleLive()">
-                                </label>
-                            </div>
-
-                        </div>
-                        <p class="text-muted mt-3 mb-0">
-                            1. Selecione a estratégia abaixo. 2. Clique em INICIAR. 3. Quando confiar, ative o MODO REAL.
-                        </p>
-                    </div>
-                </div>
-            </div>
-        </div>
-
-        <!-- Real Balance Card -->
-        <div class="row mb-4">
-            <div class="col-12">
+            <!-- Coluna Esquerda: Status & Carteira -->
+            <div class="col-lg-3">
+                <!-- Card Saldo -->
                 <div class="card">
-                    <div class="card-header-custom">
-                        <span><i class="fas fa-user-circle"></i> Minha Conta Binance</span>
-                        <span class="badge bg-info text-dark" id="account-type">CARREGANDO...</span>
-                    </div>
-                    <div class="row align-items-center">
-                        <div class="col-md-4 border-end border-secondary">
-                            <h5 class="text-muted mb-1" style="color: #a0a0a0 !important;">UID (Identificador)</h5>
-                            <h3 class="text-white fw-bold" id="user-uid" style="text-shadow: 0 0 10px rgba(255,255,255,0.1);">---</h3>
-                            <div class="mt-2">
-                                <small class="text-muted">Permissão de Trade:</small>
-                                <span id="trade-status" class="badge bg-secondary">Verificando...</span>
-                            </div>
+                    <div class="card-header"><i class="bi bi-wallet2"></i> CARTEIRA</div>
+                    <div class="card-body text-center">
+                        <h2 class="cyber-font" id="total-balance">$0.00</h2>
+                        <p class="text-muted mb-0">USDT Disponível: <span id="usdt-balance"
+                                class="text-white">$0.00</span></p>
+                        <hr class="border-secondary">
+                        <div class="d-flex justify-content-between">
+                            <span>PnL Hoje:</span>
+                            <span id="pnl-today" class="fw-bold">0.00%</span>
                         </div>
-                        <div class="col-md-8">
-                            <h5 class="text-muted mb-3" style="color: #a0a0a0 !important;">💰 Meus Saldos (Carteira Spot)</h5>
-                            <div id="balance-list" class="d-flex flex-wrap gap-3">
-                                <span class="text-muted">Carregando saldos...</span>
-                            </div>
-                            <hr class="border-secondary my-3">
-                            <div class="d-flex justify-content-between align-items-center">
-                                <h5 class="text-muted mb-0" style="color: #a0a0a0 !important;">💎 Patrimônio Total:</h5>
-                                <h3 id="total-patrimony" class="text-warning fw-bold mb-0">R$ ---</h3>
-                            </div>
-                            <small id="usdt-rate" class="text-muted">Cotação USDT: R$ ---</small>
+                    </div>
+                </div>
+
+                <!-- Card Posições Abertas -->
+                <div class="card">
+                    <div class="card-header"><i class="bi bi-layers"></i> POSIÇÕES ABERTAS</div>
+                    <div class="card-body p-0">
+                        <div class="list-group list-group-flush" id="positions-list">
+                            <!-- Inserido via JS -->
+                            <div class="text-center p-3 text-muted">Nenhuma posição ativa</div>
                         </div>
                     </div>
                 </div>
             </div>
-        </div>
 
-        <!-- Posição Ativa do Bot -->
-        <div class="row mb-4" id="position-section" style="display: none;">
-            <div class="col-12">
-                <div class="card border-success">
-                    <div class="card-header-custom">
-                        <span>📊 <strong>POSIÇÃO ATIVA DO BOT</strong></span>
-                        <span class="badge bg-success" id="position-status">COMPRADO</span>
-                    </div>
-                    <div class="row">
-                        <!-- Informações da Moeda -->
-                        <div class="col-md-3 border-end border-secondary text-center">
-                            <h4 class="text-warning mb-1" id="pos-symbol">---</h4>
-                            <small class="text-muted">Moeda</small>
-                            <div class="mt-2">
-                                <span class="fs-5 text-white" id="pos-qty">0.000</span>
-                                <small class="text-muted d-block">Quantidade</small>
-                            </div>
-                        </div>
-                        <!-- Preços -->
-                        <div class="col-md-3 border-end border-secondary">
-                            <div class="mb-3">
-                                <small class="text-muted">💰 Preço de Entrada</small>
-                                <h3 class="text-info mb-0" id="pos-entry-price">$0.00</h3>
-                            </div>
-                            <div>
-                                <small class="text-muted">📈 Preço Atual</small>
-                                <h3 class="text-white mb-0" id="pos-current-price">$0.00</h3>
-                            </div>
-                        </div>
-                        <!-- Lucro/Prejuízo -->
-                        <div class="col-md-3 border-end border-secondary text-center">
-                            <small class="text-muted">💵 Lucro/Prejuízo</small>
-                            <h2 class="mb-0" id="pos-profit-pct">+0.00%</h2>
-                            <small id="pos-profit-value" class="text-muted">$0.00</small>
-                            <div class="progress mt-2" style="height: 8px;">
-                                <div class="progress-bar" id="pos-progress" role="progressbar" style="width: 50%;"></div>
-                            </div>
-                            <small class="text-muted">Progresso até meta (+3%)</small>
-                        </div>
-                        <!-- Metas -->
-                        <div class="col-md-3 text-center">
-                            <div class="mb-2">
-                                <small class="text-success">🎯 Take Profit (+3%)</small>
-                                <h5 class="text-success mb-0" id="pos-take-profit">$0.00</h5>
-                            </div>
-                            <div class="mb-2">
-                                <small class="text-danger">🛑 Stop Loss (-3%)</small>
-                                <h5 class="text-danger mb-0" id="pos-stop-loss">$0.00</h5>
-                            </div>
-                            <div>
-                                <small class="text-muted" id="pos-entry-time">---</small>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-
-        <!-- Sem Posição Ativa -->
-        <div class="row mb-4" id="no-position-section">
-            <div class="col-12">
-                <div class="card border-secondary">
-                    <div class="card-body text-center py-4">
-                        <i class="fas fa-clock fa-3x text-muted mb-3"></i>
-                        <h4 class="text-muted">Nenhuma posição ativa</h4>
-                        <p class="text-muted mb-0">O bot está monitorando o mercado e aguardando um bom momento para comprar...</p>
-                    </div>
-                </div>
-            </div>
-        </div>
-
-        <!-- Active Strategy Monitor -->
-        <div class="row">
-            <div class="col-md-6">
-                <div class="card h-100 border-info">
-                    <div class="card-header-custom">
-                        <span>🧠 Estratégia Ativa</span>
-                        <select class="form-select w-auto bg-dark text-white border-secondary" id="strategy-selector" onchange="selectStrategy(this.value)">
-                            <option value="conservative">🛡️ Conservador (RSI < 30 + BB)</option>
-                            <option value="aggressive">🚀 Agressivo (RSI < 45 + BB)</option>
-                            <option value="rsi_pure">🎯 RSI Puro (RSI < 30)</option>
+            <!-- Coluna Central: Gráfico & Watchlist -->
+            <div class="col-lg-6">
+                <!-- Gráfico Principal -->
+                <div class="card">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <span><i class="bi bi-graph-up"></i> ANÁLISE DE MERCADO</span>
+                        <select class="form-select form-select-sm bg-dark text-light border-secondary w-auto"
+                            id="chart-symbol-select">
+                            <option value="BTC/USDT">BTC/USDT</option>
+                            <option value="ETH/USDT">ETH/USDT</option>
+                            <option value="SOL/USDT">SOL/USDT</option>
                         </select>
                     </div>
-                    <div class="card-body text-center">
-                        <h2 class="display-4 mb-0 fw-bold" id="strategy-action">AGUARDANDO</h2>
-                        <p class="text-muted">Status Atual</p>
-                        
-                        <!-- BOTÃO DE COMPRA FORÇADA -->
-                        <div class="my-3">
-                            <button class="btn btn-warning btn-lg fw-bold" onclick="forceBuy()">
-                                <i class="fas fa-bolt"></i> FORÇAR COMPRA (Teste $11)
-                            </button>
-                            <p class="text-muted small mt-2 mb-0">⚠️ Ignora indicadores. Testa se a API funciona.</p>
-                        </div>
-                        
-                        <hr class="border-secondary">
-                        <div class="row mt-4">
-                            <div class="col-6 border-end border-secondary">
-                                <h5 class="text-muted">RSI (14)</h5>
-                                <h3 id="indicator-rsi" class="text-info fw-bold">--</h3>
-                            </div>
-                            <div class="col-6">
-                                <h5 class="text-muted">Preço vs BB Low</h5>
-                                <h3 id="indicator-price" class="text-warning fw-bold">--</h3>
-                                <small class="text-muted">Alvo: <span id="indicator-bb">--</span></small>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-
-            <div class="col-md-6">
-                <div class="card h-100">
-                    <div class="card-header-custom">
-                        <span>📜 Log de Operações (Selecionada)</span>
-                        <span class="badge bg-secondary">Últimas 10</span>
-                    </div>
-                    <div class="trade-list" id="active-trades-list">
-                        <div class="text-center text-muted mt-5">
-                            <i class="fas fa-history fa-2x mb-3"></i><br>
-                            Nenhuma operação registrada ainda...
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-
-        <!-- Radar de Mercado -->
-        <div class="row mb-4">
-            <div class="col-12">
-                <div class="card">
-                    <div class="card-header-custom">
-                        <span>📡 Radar de Mercado (Tempo Real)</span>
-                    </div>
                     <div class="card-body p-0">
-                        <table class="table table-dark table-striped mb-0 text-center">
+                        <div id="chart-container"></div>
+                    </div>
+                </div>
+
+                <!-- Tabela de Oportunidades (Watchlist) -->
+                <div class="card">
+                    <div class="card-header"><i class="bi bi-radar"></i> RADAR DE OPORTUNIDADES (RSI)</div>
+                    <div class="card-body p-0 table-responsive">
+                        <table class="table table-cyber table-sm mb-0">
                             <thead>
                                 <tr>
-                                    <th>Moeda</th>
-                                    <th>Preço (USD)</th>
-                                    <th>RSI</th>
-                                    <th>🔍 Diagnóstico (Por que não comprou?)</th>
+                                    <th>Par</th>
+                                    <th>Preço</th>
+                                    <th>RSI (14)</th>
+                                    <th>Tendência</th>
+                                    <th>Ação</th>
                                 </tr>
                             </thead>
-                            <tbody id="market-overview-body">
-                                <tr><td colspan="4" class="text-muted py-3">Carregando dados do mercado...</td></tr>
+                            <tbody id="watchlist-body">
+                                <!-- JS preenche -->
                             </tbody>
                         </table>
                     </div>
                 </div>
             </div>
-        </div>
 
-        <!-- Live Mode Control (REMOVIDO - MOVIDO PARA O TOPO) -->
-        <!-- 
-        <div class="row">
-            <div class="col-12">
-                <div class="card text-center">
-                    <div class="card-header-custom justify-content-center">
-                        <span class="live-indicator" id="live-indicator"></span>
-                        <span>MODO DE EXECUÇÃO REAL</span>
-                        <label class="switch-large">
-                            <input type="checkbox" id="live-toggle" onchange="toggleLive()">
-                        </label>
+            <!-- Coluna Direita: Logs & Controle -->
+            <div class="col-lg-3">
+                <!-- Painel de Controle -->
+                <div class="card">
+                    <div class="card-header"><i class="bi bi-joystick"></i> CONTROLE MANUAL</div>
+                    <div class="card-body">
+                        <div class="d-grid gap-2">
+                            <button class="btn btn-cyber btn-sm" onclick="sendCommand('analyze')">
+                                <i class="bi bi-search"></i> FORÇAR ANÁLISE
+                            </button>
+                            <button class="btn btn-cyber btn-sm" onclick="sendCommand('report')">
+                                <i class="bi bi-file-text"></i> GERAR RELATÓRIO
+                            </button>
+                            <button class="btn btn-cyber btn-sm" onclick="sendCommand('daily_email')">
+                                <i class="bi bi-envelope"></i> TESTAR E-MAIL (FECHAMENTO)
+                            </button>
+                            <button class="btn btn-outline-danger btn-sm" onclick="sendCommand('panic')">
+                                <i class="bi bi-exclamation-triangle"></i> PANIC SELL (VENDER TUDO)
+                            </button>
+                        </div>
                     </div>
-                    <p class="text-muted mb-0">
-                        ⚠️ Quando ativado, a estratégia selecionada executará ordens de verdade na Binance
-                    </p>
+                </div>
+
+                <!-- Logs do Sistema -->
+                <div class="card">
+                    <div class="card-header"><i class="bi bi-terminal"></i> SYSTEM LOGS</div>
+                    <div class="card-body p-0">
+                        <div id="connection-info" class="px-3 py-2 border-bottom border-secondary small text-muted">
+                            API: inicializando...
+                        </div>
+                        <div id="logs-container">
+                            <div class="log-entry"><span class="log-time">--:--</span> <span
+                                    class="log-info">Inicializando interface...</span></div>
+                        </div>
+                    </div>
                 </div>
             </div>
-        </div>
-        -->
 
-        <!-- Export Data -->
-        <div class="row mb-4">
-            <div class="col-12 text-center">
-                <button class="btn btn-primary btn-lg" onclick="exportData()">
-                    <i class="fas fa-download"></i> Exportar Meus Dados (JSON)
-                </button>
-                <p class="text-muted mt-2 small">
-                    Baixa histórico de trades, ordens, saldo e informações da conta conforme documentação.
-                </p>
-            </div>
-        </div>
+        </div> <!-- End Row -->
     </div>
 
+    <!-- Scripts -->
     <script>
-        async function exportData() {
-            try {
-                const btn = document.querySelector('button[onclick="exportData()"]');
-                const originalText = btn.innerHTML;
-                btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Baixando...';
-                btn.disabled = true;
+        // --- Configuração do Gráfico (Lightweight Charts) ---
+        // Importante: se a CDN falhar no cliente (sem internet/firewall), NÃO podemos travar o restante do JS.
+        const chartContainer = document.getElementById('chart-container');
+        let chart = null;
+        let candleSeries = { setData: () => { } };
 
-                const response = await fetch('/api/export_data');
-                if (!response.ok) {
-                    const err = await response.json();
-                    throw new Error(err.error || 'Erro desconhecido');
+        function initChartSafe() {
+            try {
+                if (!window.LightweightCharts || !chartContainer) {
+                    console.warn('LightweightCharts indisponível; gráfico desativado.');
+                    return;
                 }
-                
-                const data = await response.json();
-                
-                // Cria blob e link para download
-                const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-                const url = window.URL.createObjectURL(blob);
-                const a = document.createElement('a');
-                a.href = url;
-                a.download = `binance_data_${new Date().toISOString().slice(0,10)}.json`;
-                document.body.appendChild(a);
-                a.click();
-                window.URL.revokeObjectURL(url);
-                document.body.removeChild(a);
-                
-                alert('✅ Dados exportados com sucesso!');
-            } catch (error) {
-                console.error('Erro ao exportar:', error);
-                alert('❌ Erro ao exportar dados: ' + error.message);
-            } finally {
-                const btn = document.querySelector('button[onclick="exportData()"]');
-                btn.innerHTML = '<i class="fas fa-download"></i> Exportar Meus Dados (JSON)';
-                btn.disabled = false;
+
+                chart = LightweightCharts.createChart(chartContainer, {
+                    layout: { background: { color: '#0a0a0a' }, textColor: '#00ff41' },
+                    grid: { vertLines: { color: '#1a1a1a' }, horzLines: { color: '#1a1a1a' } },
+                    timeScale: { borderColor: '#1a1a1a' },
+                    rightPriceScale: { borderColor: '#1a1a1a' },
+                });
+
+                candleSeries = chart.addCandlestickSeries({
+                    upColor: '#00ff41', downColor: '#ff003c',
+                    borderUpColor: '#00ff41', borderDownColor: '#ff003c',
+                    wickUpColor: '#00ff41', wickDownColor: '#ff003c',
+                });
+
+                // Redimensionar gráfico responsivo
+                window.addEventListener('resize', () => {
+                    try {
+                        chart.resize(chartContainer.clientWidth, 400);
+                    } catch (_) { }
+                });
+            } catch (e) {
+                console.error('Erro ao inicializar gráfico (ignorado):', e);
             }
         }
 
-        async function updateDashboard() {
+        initChartSafe();
+
+        // --- Util: logs da UI + estado de conexão ---
+        const connectionInfoEl = document.getElementById('connection-info');
+        const logsContainerEl = document.getElementById('logs-container');
+
+        function setConnectionInfo(text, ok) {
+            if (!connectionInfoEl) return;
+            connectionInfoEl.textContent = text;
+            connectionInfoEl.className = `px-3 py-2 border-bottom border-secondary small ${ok ? 'text-success' : 'text-danger'}`;
+        }
+
+        function appendUiLog(level, message) {
+            if (!logsContainerEl) return;
+            const now = new Date();
+            const time = now.toLocaleTimeString();
+            let colorClass = 'log-info';
+            if (level === 'ERROR') colorClass = 'log-error';
+            if (level === 'WARNING') colorClass = 'log-warning';
+            if (level === 'SUCCESS') colorClass = 'log-success';
+
+            const div = document.createElement('div');
+            div.className = 'log-entry';
+            div.innerHTML = `<span class="log-time">[${time}]</span> <span class="${colorClass}">UI/${level}: ${message}</span>`;
+            logsContainerEl.appendChild(div);
+            logsContainerEl.scrollTop = logsContainerEl.scrollHeight;
+        }
+
+        appendUiLog('INFO', `Carregada em ${window.location.origin}`);
+        setConnectionInfo(`API: conectando em ${window.location.origin} ...`, false);
+
+        // --- Funções de Dados ---
+
+        async function fetchStatus() {
             try {
-                const response = await fetch('/api/status');
-                const data = await response.json();
+                const res = await fetch('/api/status');
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                const data = await res.json();
 
-                // Atualiza preço e tempo
-                document.getElementById('current-price').innerText = data.current_price.toFixed(2);
-                document.getElementById('last-update').innerText = data.last_update;
-                document.getElementById('system-status').innerText = data.status;
+                // Atualiza Carteira
+                document.getElementById('total-balance').innerText = `$${parseFloat(data.total_balance).toFixed(2)}`;
+                document.getElementById('usdt-balance').innerText = `$${parseFloat(data.usdt_balance).toFixed(2)}`;
 
-                // Atualiza Botão Running
-                const btnRunning = document.getElementById('btn-running');
-                if (data.running) {
-                    btnRunning.className = 'btn btn-success btn-lg px-5 py-3 fw-bold';
-                    btnRunning.innerHTML = '<i class="fas fa-pause"></i> PAUSAR SISTEMA';
-                } else {
-                    btnRunning.className = 'btn btn-secondary btn-lg px-5 py-3 fw-bold';
-                    btnRunning.innerHTML = '<i class="fas fa-play"></i> INICIAR SISTEMA';
+                // Atualiza Status Server
+                const statusBadge = document.getElementById('server-status');
+                statusBadge.innerHTML = '<i class="bi bi-activity"></i> ONLINE';
+                statusBadge.className = 'badge badge-cyber me-3';
+
+                document.getElementById('last-update').innerText = new Date().toLocaleTimeString();
+
+                setConnectionInfo(`API: OK (${window.location.origin})`, true);
+
+            } catch (e) {
+                console.error("Erro status:", e);
+                const statusBadge = document.getElementById('server-status');
+                statusBadge.innerHTML = '<i class="bi bi-wifi-off"></i> OFFLINE';
+                statusBadge.className = 'badge badge-danger-cyber me-3';
+
+                setConnectionInfo(`API: falha (${window.location.origin})`, false);
+                appendUiLog('ERROR', `Falha em /api/status: ${e?.message || e}`);
+            }
+        }
+
+        async function fetchWatchlist() {
+            try {
+                const res = await fetch('/api/watchlist');
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                const data = await res.json();
+                const tbody = document.getElementById('watchlist-body');
+                tbody.innerHTML = '';
+
+                if (!data || data.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted py-3">Sem dados no radar</td></tr>';
+                    return;
                 }
 
-                // --- Atualiza Informações da Conta ---
-                if (data.user_info) {
-                    document.getElementById('user-uid').innerText = data.user_info.uid;
-                    document.getElementById('account-type').innerText = data.user_info.type;
-                    
-                    const tradeStatus = document.getElementById('trade-status');
-                    if (data.user_info.can_trade) {
-                        tradeStatus.className = 'badge bg-success';
-                        tradeStatus.innerText = 'ATIVO ✅';
-                    } else {
-                        tradeStatus.className = 'badge bg-danger';
-                        tradeStatus.innerText = 'BLOQUEADO ❌';
-                    }
+                data.forEach(coin => {
+                    const rsi = parseFloat(coin.rsi).toFixed(1);
+                    let rsiClass = 'text-muted';
+                    let action = '-';
 
-                    // Lista de Saldos
-                    const balanceContainer = document.getElementById('balance-list');
-                    const balances = data.user_info.balances;
-                    
-                    if (Object.keys(balances).length > 0) {
-                        balanceContainer.innerHTML = Object.entries(balances).map(([asset, amount]) => `
-                            <div class="d-flex align-items-center bg-dark p-2 rounded border border-secondary">
-                                <div class="me-2 fw-bold text-warning">${asset}</div>
-                                <div class="fs-5 text-white">${parseFloat(amount).toFixed(8)}</div>
+                    if (rsi < 30) { rsiClass = 'text-success fw-bold'; action = 'COMPRA'; }
+                    else if (rsi > 70) { rsiClass = 'text-danger fw-bold'; action = 'VENDA'; }
+
+                    const row = `
+                        <tr>
+                            <td class="fw-bold">${coin.symbol}</td>
+                            <td>$${parseFloat(coin.price).toFixed(4)}</td>
+                            <td class="${rsiClass}">${rsi}</td>
+                            <td>${coin.trend || 'Neutro'}</td>
+                            <td><span class="badge ${action === 'COMPRA' ? 'bg-success' : (action === 'VENDA' ? 'bg-danger' : 'bg-secondary')}">${action}</span></td>
+                        </tr>
+                    `;
+                    tbody.innerHTML += row;
+                });
+            } catch (e) { console.error("Erro watchlist:", e); }
+        }
+
+        async function fetchPositions() {
+            try {
+                const res = await fetch('/api/positions');
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                const data = await res.json();
+                const container = document.getElementById('positions-list');
+
+                if (!data || data.length === 0) {
+                    container.innerHTML = '<div class="text-center p-3 text-muted">Nenhuma posição ativa</div>';
+                    return;
+                }
+
+                let html = '';
+                data.forEach(pos => {
+                    const pnlClass = pos.profit_pct >= 0 ? 'text-success' : 'text-danger';
+                    const pnlIcon = pos.profit_pct >= 0 ? 'bi-graph-up-arrow' : 'bi-graph-down-arrow';
+
+                    html += `
+                        <div class="list-group-item bg-transparent border-bottom border-secondary text-light p-3">
+                            <div class="d-flex justify-content-between align-items-center mb-2">
+                                <span class="fw-bold text-warning">${pos.symbol}</span>
+                                <span class="badge bg-dark border border-secondary text-muted" style="font-size: 0.7rem">${pos.strategy}</span>
                             </div>
-                        `).join('');
-                    } else {
-                        balanceContainer.innerHTML = '<span class="text-muted">Nenhum saldo encontrado ou erro de conexão.</span>';
-                    }
-                    
-                    // Patrimônio Total em BRL
-                    if (data.user_info.total_brl !== undefined) {
-                        document.getElementById('total-patrimony').innerText = `R$ ${data.user_info.total_brl.toFixed(2)}`;
-                    }
-                    if (data.user_info.usdt_brl_rate !== undefined) {
-                        document.getElementById('usdt-rate').innerText = `Cotação USDT: R$ ${data.user_info.usdt_brl_rate.toFixed(2)}`;
-                    }
-                }
-
-                // --- Atualiza Dashboard da Estratégia Ativa ---
-                const selectedKey = data.selected_strategy;
-                const activeStrategy = data.strategies[selectedKey];
-                
-                // Atualiza Seletor (apenas se não estiver focado para não atrapalhar)
-                const selector = document.getElementById('strategy-selector');
-                if (document.activeElement !== selector) {
-                    selector.value = selectedKey;
-                }
-
-                // Atualiza Indicadores
-                if (data.indicators) {
-                    document.getElementById('indicator-rsi').innerText = data.indicators.rsi.toFixed(2);
-                    // Mostra o Símbolo junto com o preço (Ex: BNB/BRL: $4814.00)
-                    document.getElementById('indicator-price').innerText = `${data.current_symbol}: $${data.current_price.toFixed(2)}`;
-                    document.getElementById('indicator-bb').innerText = `$${data.indicators.bb_lower.toFixed(2)}`;
-                }
-
-                // --- Atualiza Radar de Mercado com Diagnóstico ---
-                const marketBody = document.getElementById('market-overview-body');
-                if (data.market_overview && marketBody) {
-                    marketBody.innerHTML = Object.entries(data.market_overview).map(([symbol, info]) => {
-                        let rsiClass = info.rsi < 30 ? 'text-success fw-bold' : (info.rsi > 70 ? 'text-danger' : 'text-warning');
-                        
-                        // Usa o diagnóstico do backend
-                        let diagnostic = info.diagnostic || 'Aguardando...';
-                        let diagnosticClass = 'text-muted';
-                        
-                        if (diagnostic.includes('✅')) {
-                            diagnosticClass = 'text-success fw-bold';
-                        } else if (diagnostic.includes('🎯')) {
-                            diagnosticClass = 'text-info fw-bold';
-                        } else if (diagnostic.includes('⏳')) {
-                            diagnosticClass = 'text-warning';
-                        }
-                        
-                        return `
-                            <tr>
-                                <td class="fw-bold text-white">${symbol}</td>
-                                <td class="text-white">$ ${info.price.toFixed(2)}</td>
-                                <td class="${rsiClass}">${info.rsi.toFixed(1)}</td>
-                                <td class="${diagnosticClass} small">${diagnostic}</td>
-                            </tr>
-                        `;
-                    }).join('');
-                }
-
-                // Atualiza Ação/Status
-                const actionEl = document.getElementById('strategy-action');
-                if (activeStrategy.position) {
-                    actionEl.innerText = "POSICIONADO";
-                    actionEl.className = "display-4 mb-0 fw-bold text-success";
-                } else {
-                    actionEl.innerText = "AGUARDANDO";
-                    actionEl.className = "display-4 mb-0 fw-bold text-muted";
-                }
-
-                // Atualiza Log de Trades da Estratégia Ativa
-                const tradesContainer = document.getElementById('active-trades-list');
-                if (activeStrategy.trades.length > 0) {
-                    const lastTrades = activeStrategy.trades.slice().reverse(); // Mostra todos ou limite
-                    tradesContainer.innerHTML = lastTrades.map(trade => `
-                        <div class="trade-item d-flex justify-content-between align-items-center">
-                            <div>
-                                <span class="badge ${trade.type.includes('BUY') ? 'bg-success' : 'bg-danger'} me-2">${trade.type}</span>
-                                <span class="text-white fw-bold">$${trade.price.toFixed(2)}</span>
+                            <div class="d-flex justify-content-between small">
+                                <span class="text-muted">Entrada:</span>
+                                <span>$${parseFloat(pos.entry_price).toFixed(4)}</span>
                             </div>
-                            <div class="text-end">
-                                <small class="d-block text-muted">${trade.time}</small>
-                                ${trade.profit_pct ? `<small class="${trade.profit_pct >= 0 ? 'text-success' : 'text-danger'}">${trade.profit_pct >= 0 ? '+' : ''}${trade.profit_pct.toFixed(2)}%</small>` : ''}
+                            <div class="d-flex justify-content-between small">
+                                <span class="text-muted">Atual:</span>
+                                <span>$${parseFloat(pos.current_price).toFixed(4)}</span>
                             </div>
-                        </div>
-                    `).join('');
-                } else {
-                    tradesContainer.innerHTML = `
-                        <div class="text-center text-muted mt-5">
-                            <i class="fas fa-history fa-2x mb-3"></i><br>
-                            Nenhuma operação registrada para <strong>${activeStrategy.name}</strong>
+                            <div class="d-flex justify-content-between align-items-center mt-2 pt-2 border-top border-dark">
+                                <span class="small text-muted">PnL:</span>
+                                <span class="fw-bold ${pnlClass}">
+                                    <i class="bi ${pnlIcon}"></i> ${parseFloat(pos.profit_pct).toFixed(2)}%
+                                </span>
+                            </div>
                         </div>
                     `;
-                }
-
-                // Atualiza indicador live
-                document.getElementById('live-toggle').checked = data.is_live;
-
-                // Atualiza seção de posição ativa
-                await updatePosition();
-
-            } catch (error) {
-                console.error('Erro ao atualizar:', error);
-            }
-        }
-
-        async function updatePosition() {
-            try {
-                const response = await fetch('/api/position');
-                const pos = await response.json();
-                
-                const positionSection = document.getElementById('position-section');
-                const noPositionSection = document.getElementById('no-position-section');
-                
-                if (pos.has_position) {
-                    // Mostra seção de posição, esconde "sem posição"
-                    positionSection.style.display = 'block';
-                    noPositionSection.style.display = 'none';
-                    
-                    // Atualiza informações
-                    document.getElementById('pos-symbol').innerText = pos.symbol;
-                    document.getElementById('pos-qty').innerText = pos.qty.toFixed(6);
-                    document.getElementById('pos-entry-price').innerText = `$${pos.entry_price.toFixed(2)}`;
-                    document.getElementById('pos-current-price').innerText = `$${pos.current_price.toFixed(2)}`;
-                    
-                    // Lucro/Prejuízo
-                    const profitEl = document.getElementById('pos-profit-pct');
-                    const profitSign = pos.profit_pct >= 0 ? '+' : '';
-                    profitEl.innerText = `${profitSign}${pos.profit_pct.toFixed(2)}%`;
-                    profitEl.className = pos.profit_pct >= 0 ? 'mb-0 text-success' : 'mb-0 text-danger';
-                    
-                    const profitValueEl = document.getElementById('pos-profit-value');
-                    const profitValueSign = pos.profit_value >= 0 ? '+' : '';
-                    profitValueEl.innerText = `${profitValueSign}$${pos.profit_value.toFixed(2)}`;
-                    profitValueEl.className = pos.profit_value >= 0 ? 'text-success' : 'text-danger';
-                    
-                    // Barra de progresso (0% = entrada, 100% = take profit 3%)
-                    const progressBar = document.getElementById('pos-progress');
-                    const progress = Math.min(100, Math.max(0, (pos.profit_pct / 3) * 100));
-                    progressBar.style.width = `${progress}%`;
-                    progressBar.className = pos.profit_pct >= 0 ? 'progress-bar bg-success' : 'progress-bar bg-danger';
-                    
-                    // Metas
-                    document.getElementById('pos-take-profit').innerText = `$${pos.take_profit_price.toFixed(2)}`;
-                    document.getElementById('pos-stop-loss').innerText = `$${pos.stop_loss_price.toFixed(2)}`;
-                    
-                    // Tempo de entrada
-                    if (pos.entry_time) {
-                        const entryDate = new Date(pos.entry_time);
-                        document.getElementById('pos-entry-time').innerText = `Entrada: ${entryDate.toLocaleString('pt-BR')}`;
-                    }
-                    
-                    // Status badge
-                    const statusBadge = document.getElementById('position-status');
-                    if (pos.profit_pct >= 2) {
-                        statusBadge.innerText = '🚀 QUASE LÁ!';
-                        statusBadge.className = 'badge bg-warning text-dark';
-                    } else if (pos.profit_pct >= 0) {
-                        statusBadge.innerText = '📈 NO LUCRO';
-                        statusBadge.className = 'badge bg-success';
-                    } else if (pos.profit_pct > -2) {
-                        statusBadge.innerText = '📉 AGUARDANDO';
-                        statusBadge.className = 'badge bg-warning text-dark';
-                    } else {
-                        statusBadge.innerText = '⚠️ ATENÇÃO';
-                        statusBadge.className = 'badge bg-danger';
-                    }
-                    
-                } else {
-                    // Esconde seção de posição, mostra "sem posição"
-                    positionSection.style.display = 'none';
-                    noPositionSection.style.display = 'block';
-                }
-            } catch (error) {
-                console.error('Erro ao atualizar posição:', error);
-            }
-        }
-
-        async function toggleRunning() {
-            const btn = document.getElementById('btn-running');
-            const isRunning = btn.classList.contains('btn-success'); // Se verde, está rodando
-            
-            try {
-                await fetch('/api/toggle_running', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ running: !isRunning })
                 });
-                updateDashboard();
-            } catch (error) {
-                console.error('Erro ao alternar running:', error);
+                container.innerHTML = html;
+
+            } catch (e) {
+                console.error("Erro positions:", e);
+                appendUiLog('WARNING', `Falha em /api/positions: ${e?.message || e}`);
             }
         }
 
-        async function selectStrategy(strategy) {
+        async function fetchLogs() {
             try {
-                await fetch('/api/select_strategy', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ strategy })
-                });
-                updateDashboard();
-            } catch (error) {
-                console.error('Erro ao selecionar estratégia:', error);
-            }
-        }
+                const res = await fetch('/api/logs');
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                const data = await res.json();
+                const container = document.getElementById('logs-container');
+                // Mantém as entradas de UI e adiciona as do servidor abaixo.
+                // Remove apenas logs antigos do servidor (marcados com data-level).
+                container.querySelectorAll('[data-log-source="server"]').forEach(n => n.remove());
 
-        async function toggleLive() {
-            const isLive = document.getElementById('live-toggle').checked;
-            try {
-                const response = await fetch('/api/toggle_live', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ is_live: isLive })
+                data.logs.forEach(log => {
+                    let colorClass = 'log-info';
+                    if (log.level === 'ERROR') colorClass = 'log-error';
+                    if (log.level === 'WARNING') colorClass = 'log-warning';
+                    if (log.message.includes('LUCRO')) colorClass = 'log-success';
+
+                    const div = document.createElement('div');
+                    div.className = 'log-entry';
+                    div.setAttribute('data-log-source', 'server');
+                    div.innerHTML = `<span class="log-time">[${log.time}]</span> <span class="${colorClass}">${log.message}</span>`;
+                    container.appendChild(div);
                 });
 
-                if (!response.ok) {
-                    alert('Erro: Chaves API não configuradas!');
-                    document.getElementById('live-toggle').checked = false;
-                }
-
-                updateDashboard();
-            } catch (error) {
-                console.error('Erro ao alternar modo:', error);
-            }
+                // Auto-scroll para o final
+                container.scrollTop = container.scrollHeight;
+            } catch (e) { console.error("Erro logs:", e); }
         }
 
-        async function forceBuy() {
-            // Confirmação de segurança
-            if (!confirm('⚠️ ATENÇÃO!\n\nIsso vai executar uma COMPRA REAL de $11 na Binance.\n\nTem certeza que deseja continuar?')) {
-                return;
-            }
-            
-            const btn = document.querySelector('button[onclick="forceBuy()"]');
-            const originalText = btn.innerHTML;
-            btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> COMPRANDO...';
-            btn.disabled = true;
-            
+        async function loadChartData(symbol) {
             try {
-                const response = await fetch('/api/force_buy', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ symbol: 'BTC/USDT' })
-                });
-                
-                const data = await response.json();
-                
-                if (data.success) {
-                    alert(`✅ SUCESSO!\n\n${data.message}\n\nOrder ID: ${data.order_id}\nPreço: $${data.price.toFixed(2)}`);
-                } else {
-                    alert(`❌ ERRO!\n\n${data.error}`);
+                // Simulação ou endpoint real de candles
+                const res = await fetch(`/api/chart/${symbol.replace('/', '_')}`);
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                const data = await res.json();
+                if (data.candles) {
+                    candleSeries.setData(data.candles);
                 }
-                
-                updateDashboard();
-            } catch (error) {
-                console.error('Erro na compra forçada:', error);
-                alert('❌ Erro de conexão: ' + error.message);
+            } catch (e) { console.error("Erro chart:", e); }
+        }
+
+        // --- Inicialização ---
+
+        // Loop de atualização (evita empilhar requisições se alguma travar)
+        let refreshInFlight = false;
+        setInterval(async () => {
+            if (refreshInFlight) return;
+            refreshInFlight = true;
+            try {
+                await Promise.allSettled([
+                    fetchStatus(),
+                    fetchWatchlist(),
+                    fetchPositions(),
+                    fetchLogs(),
+                ]);
             } finally {
-                btn.innerHTML = originalText;
-                btn.disabled = false;
+                refreshInFlight = false;
+            }
+        }, 2000); // 2 segundos
+
+        // Carregar dados iniciais
+        fetchStatus();
+        fetchWatchlist();
+        fetchPositions();
+        fetchLogs();
+
+        // Listener do Select de Gráfico
+        document.getElementById('chart-symbol-select').addEventListener('change', (e) => {
+            loadChartData(e.target.value);
+        });
+
+        // Carrega gráfico inicial
+        loadChartData('BTC/USDT');
+
+        // Comandos Manuais
+        async function sendCommand(cmd) {
+            if (!confirm(`Executar comando: ${cmd}?`)) return;
+            try {
+                const res = await fetch(`/api/command/${cmd}`, { method: 'POST' });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) {
+                    const msg = data.message || data.error || `HTTP ${res.status}`;
+                    alert(`Falha: ${msg}`);
+                    return;
+                }
+                alert(data.message || 'Comando executado!');
+            } catch (e) {
+                alert(`Erro ao enviar comando: ${e?.message || e}`);
             }
         }
 
-        // Atualiza a cada 2 segundos
-        setInterval(updateDashboard, 2000);
-        updateDashboard();
     </script>
 </body>
 

@@ -1,0 +1,30 @@
+[Unit]
+Description=Projetobinace Trading Bot (Flask + Trading Loop)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/projetobinace
+
+# Carrega variáveis do .env (BINANCE_API_KEY, TELEGRAM_TOKEN, etc.)
+EnvironmentFile=/home/ubuntu/projetobinace/.env
+
+# Usa o Python do venv
+ExecStart=/home/ubuntu/projetobinace/venv/bin/python3 /home/ubuntu/projetobinace/server.py
+
+Restart=always
+RestartSec=5
+
+# Logs no journal (use: journalctl -u projetobinace -f)
+StandardOutput=journal
+StandardError=journal
+
+# Hardening básico (seguro e compatível)
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

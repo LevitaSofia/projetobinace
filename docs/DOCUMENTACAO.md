@@ -8,8 +8,11 @@
 5. [Proteções Anti-Precipitação](#proteções-anti-precipitação)
 6. [Configurações](#configurações)
 7. [Comandos Telegram](#comandos-telegram)
-8. [Arquitetura do Sistema](#arquitetura-do-sistema)
-9. [Histórico de Correções](#histórico-de-correções)
+8. [Dashboard Web](#dashboard-web)
+9. [API HTTP](#api-http)
+10. [Arquitetura do Sistema](#arquitetura-do-sistema)
+11. [Troubleshooting (Web não conecta)](#troubleshooting-web-não-conecta)
+12. [Histórico de Correções](#histórico-de-correções)
 
 ---
 
@@ -25,6 +28,7 @@ Bot de trading automatizado para Binance que monitora múltiplas criptomoedas e 
 - ✅ Relatórios automáticos (8h, 12h, 18h, 22h)
 - ✅ Chat com IA (GPT) para análises
 - ✅ Conversão automática BRL → USDT
+ - ✅ Relatório Telegram “Profissional” separando Carteira x Radar
 
 ---
 
@@ -186,7 +190,7 @@ REPORT_HOURS = [8, 12, 18, 22]
 | `/status` | - | Status geral do bot |
 | `/saldo` | - | Ver saldos da conta |
 | `/posicao` | `/position` | Ver posição aberta |
-| `/moedas` | `/coins` | Ver todas as moedas monitoradas |
+| `/moedas` | `/coins` | Relatório Profissional (Carteira + Radar) |
 | `/relatorio` | `/report` | Gerar relatório de mercado |
 | `/comprar <MOEDA>` | `/buy` | Forçar compra (ex: `/comprar XRP`) |
 | `/converter` | `/convert` | Converter BRL → USDT |
@@ -206,7 +210,7 @@ Qualquer mensagem de texto (não comando) é respondida pelo GPT com contexto do
 projetobinace/
 ├── server.py           # Servidor principal (Flask + Trading Loop)
 ├── .env                # Variáveis de ambiente (API keys)
-├── lab_data.json       # Dados persistentes (posições, trades)
+├── sandra_trading.db   # Estado persistente (SQLite)
 ├── requirements.txt    # Dependências Python
 ├── templates/
 │   ├── index.html      # Dashboard principal
@@ -244,6 +248,67 @@ projetobinace/
 4. Aguarda 2 segundos
 5. Repete
 ```
+
+---
+
+## 🖥️ Dashboard Web
+
+O projeto inclui um dashboard web “terminal” (tema cyberpunk) servido pelo Flask.
+
+### Páginas
+
+- `/` — Dashboard principal (status, posições, radar RSI, logs)
+- `/charts` — Página de gráficos
+- `/performance` — Página de performance/histórico
+
+### Observação sobre o gráfico
+
+O dashboard tenta carregar a biblioteca do gráfico via CDN (`unpkg`). Caso o cliente esteja sem internet, com firewall ou bloqueio de CDN, o gráfico pode não carregar.
+
+Para evitar que isso trave a interface inteira, o `index.html` inicializa o gráfico em modo “safe”: se a biblioteca não estiver disponível, o restante do painel (status, radar, posições e logs) continua atualizando.
+
+---
+
+## 🌐 API HTTP
+
+O dashboard consome as seguintes rotas:
+
+- `GET /api/status`
+    - Retorna: `status`, `total_balance`, `usdt_balance`, `timestamp`.
+- `GET /api/positions`
+    - Retorna lista de posições abertas com: `symbol`, `entry_price`, `current_price`, `profit_pct`, `strategy`.
+- `GET /api/watchlist`
+    - Retorna lista do radar com: `symbol`, `price`, `rsi`, `trend`.
+- `GET /api/logs`
+    - Retorna logs (atualmente um payload simples; pode ser evoluído para ler do arquivo de log).
+- `GET /api/chart/<symbol_safe>`
+    - Retorna candles (atualmente vazio se não houver cache/histórico).
+- `POST /api/command/<cmd>`
+    - Endpoint de comando manual (placeholder para wiring futuro).
+
+---
+
+## 🧯 Troubleshooting (Web não conecta)
+
+Se a página carrega mas os dados ficam vazios (ou aparece “Inicializando interface…”):
+
+### 1) Verifique o indicador “API: …” no painel SYSTEM LOGS
+
+O dashboard exibe uma linha de diagnóstico:
+
+- `API: OK (...)` → o browser está conseguindo falar com o backend.
+- `API: falha (...)` → o browser não conseguiu acessar as rotas `/api/...`.
+
+Quando houver falha, o painel também registra linhas `UI/ERROR` com o motivo (ex.: `Failed to fetch`, `HTTP 500`).
+
+### 2) Checklist de causas comuns
+
+- **Você abriu o HTML direto (file://)**: o correto é acessar via `http://SEU_IP:5000/`.
+- **Porta 5000 bloqueada**: liberar no firewall/security group.
+- **Mixed Content (HTTPS vs HTTP)**: se você está abrindo a interface via `https://...` e o backend está em `http://...`, o navegador pode bloquear as requisições.
+- **CORS/rede**: confirme que você está acessando o mesmo host/porta que o Flask expõe.
+
+---
 
 ---
 
@@ -313,6 +378,13 @@ python server.py
 http://localhost:5000
 ```
 
+### Executar em background (Linux)
+
+```bash
+nohup ./venv/bin/python3 server.py > server.log 2>&1 & echo $! > server.pid
+tail -f server.log
+```
+
 ---
 
 ## ⚠️ Avisos Importantes
@@ -324,5 +396,4 @@ http://localhost:5000
 
 ---
 
-*Documentação gerada em 15/12/2024*
-*Versão do Bot: 2.0*
+*Documentação atualizada em 24/12/2025*

@@ -4,6 +4,16 @@
 
 # Dados do laboratório
 lab_data.json
+data/legacy/
+
+# Bancos locais
+*.db
+
+# Backups do SQLite
+backups/
+
+# PIDs
+*.pid
 
 # Logs
 *.log
