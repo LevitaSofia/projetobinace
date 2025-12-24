@@ -55,6 +55,7 @@ from openai import OpenAI
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
 import scalper_blindado
+import ceo_manager
 
 import logging
 import traceback
@@ -2668,8 +2669,33 @@ def trading_loop():
                 st['positions'][pos_sym] = pos_old
             st['position'] = None
 
+    last_ceo_check = 0.0
+
     while True:
         try:
+            if time.time() - last_ceo_check > 3600:
+                print("👔 CEO: Consultando o mercado...")
+                try:
+                    sentiment, fng_val = ceo_manager.get_market_sentiment()
+                    new_strat = ceo_manager.calculate_dynamic_strategy(sentiment, fng_val)
+
+                    with state_lock:
+                        SANDRA["ENTRY_RSI"] = new_strat["ENTRY_RSI"]
+                        SANDRA["STOP_BASE"] = new_strat["STOP_BASE"]
+                        SANDRA["ENTRY_TOL"] = new_strat["ENTRY_TOL"]
+
+                    msg_ceo = (
+                        "🧠 CEO ATUALIZOU A ESTRATEGIA:\n"
+                        f"   Modo: {new_strat['MODE']} (Indice Medo: {fng_val})\n"
+                        f"   Novo RSI Entrada: < {SANDRA['ENTRY_RSI']}\n"
+                        f"   Novo Stop: {SANDRA['STOP_BASE']}%"
+                    )
+                    print(msg_ceo)
+                    send_telegram_message(msg_ceo)
+                except Exception as e:
+                    print(f"⚠️ CEO falhou, mantendo parametros atuais: {e}")
+                last_ceo_check = time.time()
+
             rollover_pnl_if_new_day()
 
             # Fechamento diário (E-mail + Telegram)
