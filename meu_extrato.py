@@ -4,7 +4,7 @@ import json
 import os
 from datetime import datetime
 
-DB_NAME = "sandra_trading.db"
+DB_NAME = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sandra_trading.db")
 
 def conectar_db():
     if not os.path.exists(DB_NAME):

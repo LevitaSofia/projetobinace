@@ -2421,7 +2421,44 @@ def execute_real_trade(action, price, symbol, reason=None, amount_usdt=None):
                 except Exception as e:
                     print(f"⚠️ Erro saldo venda: {e}")
 
+                # Garante que markets estão carregados para precisão correta
+                try:
+                    if not exchange.markets:
+                        exchange.load_markets()
+                except Exception:
+                    pass
+
                 qty = _safe_amount(symbol, qty)
+                
+                # === CORREÇÃO CRÍTICA: Validação de Mínimos da Binance ===
+                try:
+                    market = exchange.market(symbol)
+                    min_amount = market['limits']['amount']['min']
+                    
+                    if qty < min_amount:
+                        print(f"⚠️ Quantidade {qty} menor que o mínimo {min_amount}.")
+                        
+                        # Se o saldo real na carteira for menor que o mínimo, é DUST (poeira)
+                        # Devemos limpar a posição do sistema para não ficar travado tentando vender
+                        if coin_balance < min_amount:
+                            print(f"🧹 Detectado DUST de {symbol} ({coin_balance}). Removendo posição interna.")
+                            with state_lock:
+                                if symbol in strategy.get('positions', {}):
+                                    del strategy['positions'][symbol]
+                                # Se era a posição principal
+                                if strategy.get('position') and strategy['position'].get('symbol') == symbol:
+                                    strategy['position'] = None
+                            
+                            send_telegram_message(f"🧹 *POSIÇÃO REMOVIDA (DUST)*\nSaldo {coin_balance} < Mínimo {min_amount}")
+                            _refresh_primary_position()
+                        
+                        return False
+                except Exception as e:
+                    print(f"⚠️ Erro validação min_amount: {e}")
+                    # Fallback de segurança: se qty for muito pequeno e não conseguimos validar, aborta
+                    if qty < 0.001: 
+                        return False
+                
                 if qty <= 0: return False
 
                 order = ex(exchange.create_market_sell_order, symbol, qty)
