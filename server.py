@@ -56,6 +56,7 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
 import scalper_blindado
 import ceo_manager
+import trade_reporter  # 🚨 Relatórios completos
 
 import logging
 import traceback
@@ -2699,6 +2700,28 @@ def execute_real_trade(action, price, symbol, reason=None, amount_usdt=None):
             # Envia mensagem completa (assíncrono para não atrasar trading)
             send_telegram_message(justificativa_msg)
             send_chart_to_telegram(symbol, caption="📊 Gráfico no momento da COMPRA")
+            
+            # 🚨 RELATÓRIO COMPLETO (SANDRA 2.1) para TIER B (moedas fracas/emergentes)
+            try:
+                # Define TIER (A = majors, B = resto)
+                TIER_A_SYMBOLS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BNB/USDT']
+                tier = 'A' if symbol in TIER_A_SYMBOLS else 'B'
+                
+                if tier == 'B':
+                    print(f"📧 Gerando relatório Sandra 2.1 para {symbol} (TIER B)...")
+                    trade_reporter.send_complete_report(
+                        exchange=exchange,
+                        symbol=symbol,
+                        position_size=buy_total,
+                        tp_pct=tp_usado,
+                        sl_pct=abs(sl_usado),
+                        tier=tier,
+                        send_telegram_func=None  # Já enviamos no justificativa_msg
+                    )
+            except Exception as e:
+                print(f"⚠️ Erro ao enviar relatório Sandra 2.1: {e}")
+                import traceback
+                traceback.print_exc()
             
             # ATUALIZA TODOS OS COOLDOWNS (CORREÇÃO APLICADA)
             with state_lock:
