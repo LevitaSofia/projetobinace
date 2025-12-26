@@ -2201,6 +2201,159 @@ def send_chart_to_telegram(symbol, caption=""):
         print(f"Erro ao enviar gráfico para Telegram: {e}")
 
 
+def _gerar_justificativa_compra(symbol, rsi, buy_price, buy_qty, buy_total, taxa_est, 
+                                 sl_usado, tp_usado, preco_sl, preco_tp, pos_info, reason=None):
+    """
+    🧠 JUSTIFICATIVA INTELIGENTE: Documenta por que a IA decidiu comprar.
+    
+    Fornece transparência total sobre:
+    - Fonte dos dados (Binance API, Scalper Blindado, CEO Manager)
+    - Análise técnica completa
+    - Confluência de sinais
+    - Tendência identificada
+    - Risco/Recompensa calculado
+    """
+    try:
+        # Identifica a classificação da moeda
+        coin = symbol.split('/')[0].upper()
+        from scalper_blindado import MOEDAS_FORTES
+        tier = "👑 ELITE (Forte)" if coin in MOEDAS_FORTES else "🎰 ALTCOIN (Arriscada)"
+        
+        # Busca dados técnicos do market_overview
+        market_data = lab_state.get('market_overview', {}).get(symbol, {})
+        adx = market_data.get('adx', 0.0)
+        atr = market_data.get('atr', 0.0)
+        bb_lower = market_data.get('bb_lower', 0.0)
+        vol_ratio = None
+        
+        # Calcula volume ratio se disponível
+        try:
+            last_decision = lab_state.get('last_decisions', {}).get(symbol, {})
+            scalper_reason = last_decision.get('scalper_reason', 'Análise técnica favorável')
+        except:
+            scalper_reason = reason or 'Análise técnica favorável'
+        
+        # Busca sentimento de mercado
+        try:
+            sentiment, fng_value = ceo_manager.get_market_sentiment()
+            sentimento_emoji = "😨" if sentiment == "BEAR" else "😐" if sentiment == "NEUTRO" else "😁"
+            sentimento_texto = f"{sentimento_emoji} {sentiment} (F&G: {fng_value})"
+        except:
+            sentimento_texto = "😐 NEUTRO (dados indisponíveis)"
+        
+        # Análise de tendência baseada em ADX
+        if adx > 40:
+            tendencia = "📈 Tendência FORTE (ADX > 40) - Movimento sustentável"
+        elif adx > 25:
+            tendencia = "📊 Tendência MODERADA (ADX 25-40) - Confirmação presente"
+        elif adx > 15:
+            tendencia = "〰️ Tendência FRACA (ADX 15-25) - Mercado lateral"
+        else:
+            tendencia = "🔄 SEM TENDÊNCIA (ADX < 15) - Reversão à média esperada"
+        
+        # Análise de volatilidade
+        if atr > 0:
+            atr_pct = (atr / buy_price * 100)
+            if atr_pct > 3.0:
+                volatilidade = f"⚡ ALTA ({atr_pct:.2f}%) - Stop Loss ajustado"
+            elif atr_pct > 1.5:
+                volatilidade = f"📊 MODERADA ({atr_pct:.2f}%) - Configuração ideal"
+            else:
+                volatilidade = f"🔒 BAIXA ({atr_pct:.2f}%) - Stop Loss apertado"
+        else:
+            volatilidade = "📊 Dados insuficientes"
+        
+        # Fonte dos dados
+        fonte_dados = "📡 *FONTES DOS DADOS:*\n"
+        fonte_dados += "• Preço/Volume: Binance API (tempo real)\n"
+        fonte_dados += "• Indicadores: Scalper Blindado (RSI, BB, ADX, ATR)\n"
+        fonte_dados += "• Sentimento: CEO Manager (Fear & Greed Index)\n"
+        if pos_info.get('sl_dinamico'):
+            fonte_dados += "• SL/TP: IA Dinâmica (ATR + ADX + Sentimento)\n"
+        else:
+            fonte_dados += "• SL/TP: Valores fixos (Sandra Mode)\n"
+        
+        # Confluência de sinais
+        confluencia = "🎯 *CONFLUÊNCIA DE SINAIS:*\n"
+        pontos = 0
+        
+        if rsi < 20:
+            confluencia += f"✅ RSI {rsi:.1f} < 20 (EXTREMO) +3pts\n"
+            pontos += 3
+        elif rsi < 25:
+            confluencia += f"✅ RSI {rsi:.1f} < 25 (FORTE) +2pts\n"
+            pontos += 2
+        elif rsi < 30:
+            confluencia += f"✅ RSI {rsi:.1f} < 30 (PADRÃO) +1pt\n"
+            pontos += 1
+        else:
+            confluencia += f"⚠️ RSI {rsi:.1f} (sem bônus)\n"
+        
+        if bb_lower > 0 and buy_price <= bb_lower * 1.02:
+            confluencia += f"✅ Preço na Banda Inferior (sobrevenda) +1pt\n"
+            pontos += 1
+        
+        if sentiment == "BEAR":
+            confluencia += f"✅ Mercado em PÂNICO (compra contra-tendência) +2pts\n"
+            pontos += 2
+        elif sentiment == "NEUTRO":
+            confluencia += f"• Sentimento neutro +1pt\n"
+            pontos += 1
+        
+        confluencia += f"\n📊 *Total: {pontos} pontos* "
+        if pontos >= 6:
+            confluencia += "→ OPORTUNIDADE MÁXIMA 💎"
+        elif pontos >= 4:
+            confluencia += "→ SINAL FORTE 🔥"
+        elif pontos >= 2:
+            confluencia += "→ SINAL PADRÃO 🚀"
+        else:
+            confluencia += "→ Sinal fraco"
+        
+        # Monta mensagem completa
+        msg = f"🚨 *DECISÃO DA IA: NOVA POSIÇÃO* 🚨\n\n"
+        msg += f"🪙 *Ativo:* {symbol} ({tier})\n"
+        msg += f"✅ *Ação:* COMPRA\n"
+        msg += f"💵 *Preço:* ${buy_price:.4f}\n"
+        msg += f"📦 *Quantidade:* {buy_qty:.4f}\n"
+        msg += f"💰 *Investido:* ${buy_total:.2f}\n"
+        msg += f"💸 *Taxa:* -${taxa_est:.3f}\n\n"
+        
+        msg += f"🧠 *JUSTIFICATIVA TÉCNICA:*\n"
+        msg += f"📉 RSI: {rsi:.1f} (sobrevendido)\n"
+        msg += f"{tendencia}\n"
+        msg += f"⚡ Volatilidade: {volatilidade}\n"
+        msg += f"📊 Sentimento: {sentimento_texto}\n"
+        msg += f"💡 Motivo: {scalper_reason}\n\n"
+        
+        msg += confluencia + "\n\n"
+        
+        msg += f"🎯 *GESTÃO DE RISCO:*\n"
+        if pos_info.get('sl_dinamico'):
+            msg += f"🧠 Modo: IA DINÂMICA (adaptado)\n"
+        else:
+            msg += f"📌 Modo: FIXO (Sandra Mode)\n"
+        msg += f"🛑 Stop Loss: {sl_usado:.2f}% (${preco_sl:.4f})\n"
+        msg += f"✅ Take Profit: {tp_usado:.2f}% (${preco_tp:.4f})\n"
+        msg += f"📊 R:R: {abs(tp_usado/sl_usado):.2f}:1\n\n"
+        
+        msg += fonte_dados + "\n"
+        msg += f"⏰ Horário: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}"
+        
+        return msg
+        
+    except Exception as e:
+        print(f"⚠️ Erro ao gerar justificativa: {e}")
+        # Fallback: mensagem simples
+        return (
+            f"🔵 *COMPRA EXECUTADA* | {symbol}\n\n"
+            f"💵 Preço: ${buy_price:.4f}\n"
+            f"📦 Qtd: {buy_qty:.4f}\n"
+            f"📉 RSI: {rsi:.1f}\n\n"
+            f"🎯 SL: {sl_usado:.2f}% | TP: {tp_usado:.2f}%"
+        )
+
+
 def execute_real_trade(action, price, symbol, reason=None, amount_usdt=None):
     """Executa trade REAL na Binance (Suporte a MÚLTIPLAS POSIÇÕES; máx 3)."""
     if not exchange or not API_KEY or not SECRET:
@@ -2420,23 +2573,26 @@ def execute_real_trade(action, price, symbol, reason=None, amount_usdt=None):
             # Preços alvo
             preco_sl = buy_price * (1 + sl_usado / 100)
             preco_tp = buy_price * (1 + tp_usado / 100)
-
-            # Relatório Visual
-            msg = (
-                f"🔵 *COMPRA EXECUTADA* | {symbol}\n\n"
-                f"💵 *Preço:* ${buy_price:.4f}\n"
-                f"📦 *Qtd:* {buy_qty:.4f}\n"
-                f"📉 *RSI:* {rsi:.1f}\n\n"
-                f"🧾 *Financeiro:*\n"
-                f"Investido: ${buy_total:.2f}\n"
-                f"Taxa (est.): -${taxa_est:.3f}\n\n"
-                f"🎯 *Alvos {'🧠 IA DINÂMICA' if pos_info.get('sl_dinamico') else 'FIXOS'}:*\n"
-                f"🛑 Stop Loss: {sl_usado:.2f}% (${preco_sl:.4f})\n"
-                f"✅ Take Profit: {tp_usado:.2f}% (${preco_tp:.4f})\n"
-                f"📊 Risco/Recompensa: {abs(tp_usado/sl_usado):.2f}:1"
+            
+            # 🧠 GERA JUSTIFICATIVA INTELIGENTE DA IA
+            justificativa_msg = _gerar_justificativa_compra(
+                symbol=symbol,
+                rsi=rsi,
+                buy_price=buy_price,
+                buy_qty=buy_qty,
+                buy_total=buy_total,
+                taxa_est=taxa_est,
+                sl_usado=sl_usado,
+                tp_usado=tp_usado,
+                preco_sl=preco_sl,
+                preco_tp=preco_tp,
+                pos_info=pos_info,
+                reason=reason
             )
-            send_telegram_message(msg)
-            send_chart_to_telegram(symbol, caption="Gráfico no momento da COMPRA")
+
+            # Envia mensagem completa (assíncrono para não atrasar trading)
+            send_telegram_message(justificativa_msg)
+            send_chart_to_telegram(symbol, caption="📊 Gráfico no momento da COMPRA")
             
             # ATUALIZA TODOS OS COOLDOWNS (CORREÇÃO APLICADA)
             with state_lock:
