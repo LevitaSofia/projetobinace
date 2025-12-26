@@ -3,7 +3,7 @@
 Regras:
 - Moedas ELITE (BTC/ETH/BNB/SOL) compram mais fácil (RSI < 35)
 - Altcoins/DEGEN só entram no fundo (RSI < 28)
-- Não há bloqueio por "baixa volatilidade" (ATR) para não perder fundos.
+- Retorna ATR, ADX, Volume ratio para IA tomar decisões inteligentes
 """
 
 import pandas as pd
@@ -22,6 +22,18 @@ def analisar_sinal_hibrido(candles_raw, symbol_name="UNKNOWN"):
 
     Returns:
         (Aprovado: bool, Motivo: str, Dados: dict)
+        
+    Dados incluem:
+        - price: Preço atual
+        - rsi: RSI atual
+        - adx: Força da tendência
+        - atr: Volatilidade (usado para SL dinâmico)
+        - atr_pct: ATR em % do preço
+        - bb_lower/bb_upper: Bandas de Bollinger
+        - vol_now: Volume atual
+        - vol_avg: Volume médio
+        - vol_ratio: Volume atual / média
+        - tier: Classificação da moeda (ELITE ou DEGEN)
     """
     try:
         if not candles_raw or len(candles_raw) < 20:
@@ -67,7 +79,7 @@ def analisar_sinal_hibrido(candles_raw, symbol_name="UNKNOWN"):
         except Exception:
             df['ADX'] = 0.0
 
-        # ATR 14 (telemetria)
+        # ATR 14 (telemetria) - ESSENCIAL PARA IA
         df['ATR'] = ta.atr(df['high'], df['low'], df['close'], length=14)
 
         bb = ta.bbands(df['close'], length=20, std=2.0)
@@ -105,14 +117,25 @@ def analisar_sinal_hibrido(candles_raw, symbol_name="UNKNOWN"):
         except Exception:
             bb_lower, bb_upper = float('nan'), float('nan')
 
+        # 🧠 INTELIGÊNCIA: Calcula volume ratio (para aposta dinâmica)
+        vol_now = float(atual['volume']) if not pd.isna(atual['volume']) else 0.0
+        vol_avg = float(df['volume'].tail(20).mean()) if len(df) >= 20 else vol_now
+        vol_ratio = vol_now / vol_avg if vol_avg > 0 else 1.0
+        
+        # 🧠 INTELIGÊNCIA: ATR em % do preço (para SL dinâmico)
+        atr_pct = (atr / price * 100) if price > 0 and atr > 0 else 0.0
+
         dados = {
             'price': price,
             'rsi': rsi,
             'adx': adx,
             'atr': atr,
+            'atr_pct': atr_pct,  # Novo: ATR em %
             'bb_lower': bb_lower,
             'bb_upper': bb_upper,
-            'vol_now': float(atual['volume']) if not pd.isna(atual['volume']) else 0.0,
+            'vol_now': vol_now,
+            'vol_avg': vol_avg,  # Novo: Volume médio
+            'vol_ratio': vol_ratio,  # Novo: Ratio do volume
             'tier': config.get('TIPO'),
         }
 

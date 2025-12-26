@@ -1668,10 +1668,16 @@ SANDRA = {
     
     "SELL_RSI": 65,
     
-    "STOP_BASE": -3.0,
+    # 🧠 IA DINÂMICA: SL/TP são calculados por ATR + ADX + Sentimento
+    "STOP_BASE": -3.0,  # Fallback (se IA falhar)
     "STOP_DRAWDOWN": -2.0,
+    "TP_SLOW": 5.0,  # Fallback (se IA falhar)
     
-    "TP_SLOW": 5.0,
+    # Valores dinâmicos calculados pela IA (atualizados por posição)
+    "STOP_DINAMICO": -1.8,  # Calculado por calcular_sl_dinamico()
+    "TP_DINAMICO": 4.0,  # Calculado por calcular_tp_dinamico()
+    "USE_DYNAMIC_RISK": True,  # Flag para ativar/desativar IA dinâmica
+    
     "FAST_PROFIT": 8.0,
     "FAST_WINDOW_S": 300,
     "TRAIL_FAST": 3.0,
@@ -1938,7 +1944,7 @@ def get_diagnostic(strategy_name, price, rsi, bb_lower, position=None):
 
 def check_exit_signal(position, current_price, rsi, bb_upper=None, strategy_name=None):
     """
-    SAÍDA SANDRA MODE CORRETO com trailing PERSISTENTE.
+    🧠 SAÍDA INTELIGENTE com IA DINÂMICA (ATR + ADX + Sentimento).
     """
     # Se for estratégia parcial, usa lógica específica
     if strategy_name == 'aggressive_parcial':
@@ -1973,11 +1979,17 @@ def check_exit_signal(position, current_price, rsi, bb_upper=None, strategy_name
             return True, f"RSI Alto ({rsi:.1f}) + Lucro Garantido ({profit_pct:.2f}%)"
         # RSI alto mas sem margem: não vende por RSI, deixa outras regras decidirem
     
-    # 2) Stop loss dinâmico
+    # 2) 🧠 Stop loss DINÂMICO (IA ou fallback)
     with state_lock:
         drawdown_mode = bool(GLOBAL_STATS.get('drawdown_mode', False))
-
-    stop_limit = SANDRA["STOP_DRAWDOWN"] if drawdown_mode else SANDRA["STOP_BASE"]
+        use_dynamic = SANDRA.get("USE_DYNAMIC_RISK", False)
+    
+    # Se IA estiver ativa E a posição tiver SL personalizado, usa ele
+    if use_dynamic and position.get('sl_dinamico') is not None:
+        stop_limit = float(position['sl_dinamico'])
+    else:
+        # Fallback: modo antigo
+        stop_limit = SANDRA["STOP_DRAWDOWN"] if drawdown_mode else SANDRA["STOP_BASE"]
     if profit_pct <= stop_limit:
         return True, f"STOP {stop_limit}%"
 
@@ -2022,9 +2034,18 @@ def check_exit_signal(position, current_price, rsi, bb_upper=None, strategy_name
             return True, f"TRAIL {SANDRA['TRAIL_FAST']}% (subida rápida)"
         return False, f"{hold_hint + ' | ' if hold_hint else ''}Segurando (trailing ativo)"
     
-    # 4) TP fixo (subida lenta)
-    if profit_pct >= SANDRA["TP_SLOW"]:
-        return True, f"TP {SANDRA['TP_SLOW']}% (subida lenta)"
+    # 4) 🧠 TP DINÂMICO (IA ou fallback)
+    with state_lock:
+        use_dynamic = SANDRA.get("USE_DYNAMIC_RISK", False)
+    
+    if use_dynamic and position.get('tp_dinamico') is not None:
+        tp_target = float(position['tp_dinamico'])
+        if profit_pct >= tp_target:
+            return True, f"🧠 TP DINÂMICO {tp_target:.1f}% (IA: ATR+ADX+Sentimento)"
+    else:
+        # Fallback: TP fixo (subida lenta)
+        if profit_pct >= SANDRA["TP_SLOW"]:
+            return True, f"TP {SANDRA['TP_SLOW']}% (subida lenta)"
     
     return False, f"{hold_hint + ' | ' if hold_hint else ''}Segurando"
 
@@ -2353,11 +2374,52 @@ def execute_real_trade(action, price, symbol, reason=None, amount_usdt=None):
                     'entry_rsi': rsi,
                     'log_entry': f"Compra em {now_sp().strftime('%H:%M')} | RSI: {rsi:.1f}",
                 }
+                
+                # 🧠 INTELIGÊNCIA ARTIFICIAL: Calcula SL/TP dinâmico no momento da compra
+                try:
+                    if SANDRA.get("USE_DYNAMIC_RISK", False):
+                        # Busca dados do mercado para IA
+                        market_data = lab_state.get('market_overview', {}).get(symbol, {})
+                        atr = market_data.get('atr', 0.0)
+                        adx = market_data.get('adx', 0.0)
+                        
+                        # Busca sentimento de mercado
+                        try:
+                            sentiment, _ = ceo_manager.get_market_sentiment()
+                        except Exception:
+                            sentiment = "NEUTRO"
+                        
+                        # Calcula SL dinâmico (ATR + ADX + Sentimento)
+                        if atr and atr > 0:
+                            atr_pct = (atr / buy_price * 100) if buy_price > 0 else 0.0
+                            sl_dinamico = ceo_manager.calcular_sl_dinamico(atr_pct, adx, sentiment)
+                            new_pos['sl_dinamico'] = sl_dinamico
+                            
+                            # Calcula TP dinâmico (garante R:R >= 1.5:1)
+                            tp_dinamico = ceo_manager.calcular_tp_dinamico(sl_dinamico, adx, rsi, sentiment)
+                            new_pos['tp_dinamico'] = tp_dinamico
+                            
+                            print(f"🧠 IA: SL={sl_dinamico:.2f}% | TP={tp_dinamico:.2f}% | ATR={atr_pct:.2f}% | ADX={adx:.1f} | Sentimento={sentiment}")
+                        else:
+                            print(f"⚠️ ATR inválido ({atr}), usando SL/TP fixos")
+                except Exception as e:
+                    print(f"⚠️ Erro ao calcular SL/TP dinâmico: {e}")
+                
                 strategy.setdefault('positions', {})
                 strategy['positions'][symbol] = new_pos
             
             print(f"💰 [{strategy['name']}] COMPRA REAL: {buy_qty:.4f} {symbol} @ ${buy_price:.4f}")
             taxa_est = buy_total * FEE_RATE
+
+            # Busca SL/TP da posição (dinâmico ou fixo)
+            with state_lock:
+                pos_info = strategy['positions'].get(symbol, {})
+                sl_usado = pos_info.get('sl_dinamico', SANDRA.get('STOP_BASE', -3.0))
+                tp_usado = pos_info.get('tp_dinamico', SANDRA.get('TP_SLOW', 5.0))
+                
+            # Preços alvo
+            preco_sl = buy_price * (1 + sl_usado / 100)
+            preco_tp = buy_price * (1 + tp_usado / 100)
 
             # Relatório Visual
             msg = (
@@ -2367,7 +2429,11 @@ def execute_real_trade(action, price, symbol, reason=None, amount_usdt=None):
                 f"📉 *RSI:* {rsi:.1f}\n\n"
                 f"🧾 *Financeiro:*\n"
                 f"Investido: ${buy_total:.2f}\n"
-                f"Taxa (est.): -${taxa_est:.3f}"
+                f"Taxa (est.): -${taxa_est:.3f}\n\n"
+                f"🎯 *Alvos {'🧠 IA DINÂMICA' if pos_info.get('sl_dinamico') else 'FIXOS'}:*\n"
+                f"🛑 Stop Loss: {sl_usado:.2f}% (${preco_sl:.4f})\n"
+                f"✅ Take Profit: {tp_usado:.2f}% (${preco_tp:.4f})\n"
+                f"📊 Risco/Recompensa: {abs(tp_usado/sl_usado):.2f}:1"
             )
             send_telegram_message(msg)
             send_chart_to_telegram(symbol, caption="Gráfico no momento da COMPRA")
@@ -2907,25 +2973,56 @@ def trading_loop():
                                         GLOBAL_STATS['drawdown_mode'] = True
                                         print(f"🛡️ MODO PROTEÇÃO: Equity caiu 10% (${equity:.2f} < ${GLOBAL_STATS['peak_balance'] * 0.9:.2f})")
                                 
-                                # --- INTEGRAÇÃO DO CÉREBRO ---
+                                # --- INTEGRAÇÃO DO CÉREBRO + IA DINÂMICA ---
                                 invest_amount = 0.0
                                 
                                 # Se o Scalper Blindado der sinal VERDADEIRO, entramos!
                                 if sinal_compra_blindado and not btc_bleeding:
-                                    # Lógica de Aposta Sandra ($11/$22/$33)
-                                    rsi_val = indicadores.get('rsi', 50)
-                                    
-                                    if rsi_val < 20:
-                                        invest_amount = 33.0
-                                        print(f"💎 SINAL EXCEPCIONAL (RSI {rsi_val:.1f} < 20)! Apostando $33")
-                                    elif rsi_val < 25:
-                                        invest_amount = 22.0
-                                        print(f"🔥 SINAL FORTE (RSI {rsi_val:.1f} < 25)! Apostando $22")
-                                    else:
-                                        invest_amount = 11.0
-                                        print(f"🚀 SINAL PADRÃO (RSI {rsi_val:.1f})! Apostando $11")
-                                    
-                                    print(f"🧠 Motivo Scalper: {motivo_blindado}")
+                                    # 🧠 IA DINÂMICA: Calcula tamanho da aposta baseado em confluências
+                                    try:
+                                        rsi_val = indicadores.get('rsi', 50)
+                                        vol_ratio = indicadores.get('vol_ratio', 1.0)
+                                        atr_val = indicadores.get('atr', 0.0)
+                                        
+                                        # Busca sentimento de mercado
+                                        try:
+                                            sentiment, _ = ceo_manager.get_market_sentiment()
+                                        except Exception:
+                                            sentiment = "NEUTRO"
+                                        
+                                        # Calcula aposta inteligente (considera RSI + Volume + Sentimento + ATR)
+                                        invest_amount = ceo_manager.calcular_tamanho_aposta(
+                                            rsi_value=rsi_val,
+                                            volume_ratio=vol_ratio,
+                                            sentiment=sentiment,
+                                            atr_value=atr_val,
+                                            base_bet=11.0
+                                        )
+                                        
+                                        if invest_amount >= 33.0:
+                                            print(f"💎 🧠 IA: SINAL EXCEPCIONAL! Aposta ${invest_amount:.0f}")
+                                            print(f"   Confluências: RSI={rsi_val:.1f} | Volume={vol_ratio:.2f}x | Sentimento={sentiment} | ATR={atr_val:.2f}")
+                                        elif invest_amount >= 22.0:
+                                            print(f"🔥 🧠 IA: SINAL FORTE! Aposta ${invest_amount:.0f}")
+                                            print(f"   Confluências: RSI={rsi_val:.1f} | Volume={vol_ratio:.2f}x | Sentimento={sentiment}")
+                                        elif invest_amount >= 11.0:
+                                            print(f"🚀 🧠 IA: SINAL PADRÃO! Aposta ${invest_amount:.0f}")
+                                            print(f"   RSI={rsi_val:.1f}")
+                                        else:
+                                            print(f"⚠️ 🧠 IA: Sinal fraco, não aposta (pontuação baixa)")
+                                        
+                                        print(f"🧠 Motivo Scalper: {motivo_blindado}")
+                                        
+                                    except Exception as e:
+                                        # Fallback: lógica antiga
+                                        print(f"⚠️ Erro na IA de apostas, usando lógica clássica: {e}")
+                                        rsi_val = indicadores.get('rsi', 50)
+                                        if rsi_val < 20:
+                                            invest_amount = 33.0
+                                        elif rsi_val < 25:
+                                            invest_amount = 22.0
+                                        else:
+                                            invest_amount = 11.0
 
                                 if sinal_compra_blindado and btc_bleeding:
                                     with state_lock:
