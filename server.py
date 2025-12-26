@@ -248,6 +248,10 @@ SYMBOL = os.getenv('SYMBOL', 'BTC/USDT')
 AMOUNT_INVEST = float(os.getenv('AMOUNT_INVEST', 11.0))
 FEE_RATE = 0.001  # 0.1%
 
+# 💰 JURO COMPOSTO: Saldo base para escalar apostas automaticamente
+# À medida que o saldo cresce, as apostas aumentam proporcionalmente
+SALDO_BASE = float(os.getenv('SALDO_BASE', 100.0))  # Saldo inicial da conta
+
 # Configuração GPT (controle de uso)
 OPENAI_MODEL = os.getenv('OPENAI_MODEL', 'gpt-4.1-mini')
 ENABLE_GPT_TUNING = os.getenv('ENABLE_GPT_TUNING', 'false').lower() == 'true'
@@ -3146,24 +3150,31 @@ def trading_loop():
                                         except Exception:
                                             sentiment = "NEUTRO"
                                         
-                                        # Calcula aposta inteligente (considera RSI + Volume + Sentimento + ATR)
+                                        # 💰 JURO COMPOSTO: Calcula fator de escala baseado no saldo atual
+                                        saldo_atual = lab_state.get('real_balance', SALDO_BASE)
+                                        fator_escala = max(1.0, saldo_atual / SALDO_BASE)  # Nunca menor que 1.0
+                                        base_bet_escalada = 11.0 * fator_escala
+                                        
+                                        # Calcula aposta inteligente (considera RSI + Volume + Sentimento + ATR + Juro Composto)
                                         invest_amount = ceo_manager.calcular_tamanho_aposta(
                                             rsi_value=rsi_val,
                                             volume_ratio=vol_ratio,
                                             sentiment=sentiment,
                                             atr_value=atr_val,
-                                            base_bet=11.0
+                                            base_bet=base_bet_escalada
                                         )
                                         
                                         if invest_amount >= 33.0:
-                                            print(f"💎 🧠 IA: SINAL EXCEPCIONAL! Aposta ${invest_amount:.0f}")
+                                            print(f"💎 🧠 IA: SINAL EXCEPCIONAL! Aposta ${invest_amount:.2f}")
                                             print(f"   Confluências: RSI={rsi_val:.1f} | Volume={vol_ratio:.2f}x | Sentimento={sentiment} | ATR={atr_val:.2f}")
+                                            print(f"   💰 Fator de Escala (Juro Composto): {fator_escala:.2f}x (Saldo: ${saldo_atual:.2f})")
                                         elif invest_amount >= 22.0:
-                                            print(f"🔥 🧠 IA: SINAL FORTE! Aposta ${invest_amount:.0f}")
+                                            print(f"🔥 🧠 IA: SINAL FORTE! Aposta ${invest_amount:.2f}")
                                             print(f"   Confluências: RSI={rsi_val:.1f} | Volume={vol_ratio:.2f}x | Sentimento={sentiment}")
+                                            print(f"   💰 Fator de Escala: {fator_escala:.2f}x")
                                         elif invest_amount >= 11.0:
-                                            print(f"🚀 🧠 IA: SINAL PADRÃO! Aposta ${invest_amount:.0f}")
-                                            print(f"   RSI={rsi_val:.1f}")
+                                            print(f"🚀 🧠 IA: SINAL PADRÃO! Aposta ${invest_amount:.2f}")
+                                            print(f"   RSI={rsi_val:.1f} | 💰 Escala: {fator_escala:.2f}x")
                                         else:
                                             print(f"⚠️ 🧠 IA: Sinal fraco, não aposta (pontuação baixa)")
                                         
