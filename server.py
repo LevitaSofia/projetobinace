@@ -57,6 +57,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, Messa
 import scalper_blindado
 import ceo_manager
 import trade_reporter  # 🚨 Relatórios completos
+import sandra_filters  # 🏆 Sandra 3.1: Majors First
 
 import logging
 import traceback
@@ -2309,7 +2310,8 @@ def send_chart_to_telegram(symbol, caption=""):
 
 
 def _gerar_justificativa_compra(symbol, rsi, buy_price, buy_qty, buy_total, taxa_est, 
-                                 sl_usado, tp_usado, preco_sl, preco_tp, pos_info, reason=None):
+                                 sl_usado, tp_usado, preco_sl, preco_tp, pos_info, reason=None,
+                                 rsi_15m=None, edge_liquido=None, regime_btc=None, tier=None):
     """
     🧠 JUSTIFICATIVA INTELIGENTE: Documenta por que a IA decidiu comprar.
     
@@ -2459,10 +2461,18 @@ Prioridade sobre altcoins.
         msg += f"💸 *Taxa:* -${taxa_est:.3f}\n\n"
         
         msg += f"🧠 *JUSTIFICATIVA TÉCNICA:*\n"
-        msg += f"📉 RSI: {rsi:.1f} (sobrevendido)\n"
+        msg += f"📉 RSI 5m: {rsi:.1f} (sobrevendido)\n"
+        if rsi_15m:
+            msg += f"📉 RSI 15m: {rsi_15m:.1f} (confirmação)\n"
         msg += f"{tendencia}\n"
         msg += f"⚡ Volatilidade: {volatilidade}\n"
         msg += f"📊 Sentimento: {sentimento_texto}\n"
+        if regime_btc:
+            regime_emoji = "🐂" if regime_btc == "BULL" else "🐻" if regime_btc == "BEAR" else "⚖️"
+            msg += f"🌊 Regime BTC: {regime_emoji} {regime_btc}\n"
+        if edge_liquido is not None:
+            edge_status = "✅" if edge_liquido >= 0.5 else "⚠️"
+            msg += f"💰 Edge líquido: {edge_status} {edge_liquido:.2f}%\n"
         msg += f"💡 Motivo: {scalper_reason}\n\n"
         
         msg += confluencia + "\n\n"
@@ -2713,6 +2723,9 @@ def execute_real_trade(action, price, symbol, reason=None, amount_usdt=None):
             preco_sl = buy_price * (1 + sl_usado / 100)
             preco_tp = buy_price * (1 + tp_usado / 100)
             
+            # Busca dados Sandra 3.1 (se disponíveis)
+            sandra_data = lab_state.get('sandra_data', {}).get(symbol, {})
+            
             # 🧠 GERA JUSTIFICATIVA INTELIGENTE DA IA
             justificativa_msg = _gerar_justificativa_compra(
                 symbol=symbol,
@@ -2726,7 +2739,11 @@ def execute_real_trade(action, price, symbol, reason=None, amount_usdt=None):
                 preco_sl=preco_sl,
                 preco_tp=preco_tp,
                 pos_info=pos_info,
-                reason=reason
+                reason=reason,
+                rsi_15m=sandra_data.get('rsi_15m'),
+                edge_liquido=sandra_data.get('edge_liquido'),
+                regime_btc=sandra_data.get('regime_btc'),
+                tier=sandra_data.get('tier')
             )
 
             # Envia mensagem completa (assíncrono para não atrasar trading)
@@ -3395,8 +3412,132 @@ def trading_loop():
                                 # --- INTEGRAÇÃO DO CÉREBRO + IA DINÂMICA ---
                                 invest_amount = 0.0
                                 
-                                # Se o Scalper Blindado der sinal VERDADEIRO, entramos!
+                                # Se o Scalper Blindado der sinal VERDADEIRO, aplicamos Sandra 3.1!
                                 if sinal_compra_blindado and not btc_bleeding:
+                                    
+                                    # 🏆 SANDRA 3.1: Filtros Completos (RSI multi-timeframe + Edge + Regime)
+                                    print(f"🔍 SANDRA 3.1: Aplicando filtros completos para {current_symbol}...")
+                                    
+                                    # 1. RSI Multi-timeframe (5m + 15m)
+                                    rsi_data = sandra_filters.calculate_rsi_multitimeframe(exchange, current_symbol)
+                                    if not rsi_data.get('success'):
+                                        print(f"🚫 SANDRA 3.1: Erro ao calcular RSI multi-timeframe")
+                                        with state_lock:
+                                            lab_state.setdefault('last_decisions', {}).setdefault(current_symbol, {})
+                                            lab_state['last_decisions'][current_symbol].update({
+                                                'buy_attempted': False,
+                                                'buy_result': False,
+                                                'block_reason': f'Sandra 3.1: Erro RSI multi-timeframe',
+                                            })
+                                        continue
+                                    
+                                    rsi_5m = rsi_data['rsi_5m']
+                                    rsi_15m = rsi_data['rsi_15m']
+                                    print(f"  • RSI 5m: {rsi_5m:.1f} | RSI 15m: {rsi_15m:.1f}")
+                                    
+                                    # 2. Regime BTC
+                                    regime_data = sandra_filters.calculate_btc_regime(exchange)
+                                    if not regime_data.get('success'):
+                                        print(f"⚠️ SANDRA 3.1: Erro ao calcular regime BTC, assumindo NEUTRAL")
+                                        regime_btc = 'NEUTRAL'
+                                    else:
+                                        regime_btc = regime_data['regime']
+                                        print(f"  • Regime BTC: {regime_btc} (EMA50: ${regime_data['ema50']:,.2f} vs EMA200: ${regime_data['ema200']:,.2f})")
+                                    
+                                    # 3. Edge Líquido
+                                    position_size_test = 11.0  # Tamanho padrão para teste
+                                    tp_test = 2.7  # TP médio
+                                    edge_data = sandra_filters.calculate_edge_liquido(
+                                        current_symbol, position_size_test, tp_test, exchange
+                                    )
+                                    if not edge_data.get('success'):
+                                        print(f"⚠️ SANDRA 3.1: Erro ao calcular edge, assumindo custos padrão")
+                                        edge_liquido = 0.5  # Fallback conservador
+                                    else:
+                                        edge_liquido = edge_data['edge_liquido']
+                                        print(f"  • Edge líquido: {edge_liquido:.2f}% (custos: {edge_data['costs_total']:.2f}%)")
+                                    
+                                    # 4. Verifica TIER
+                                    is_tier_a = sandra_filters.is_tier_a(current_symbol)
+                                    tier = 'A' if is_tier_a else 'B'
+                                    print(f"  • TIER: {tier} ({'👑 MAJOR' if is_tier_a else '🎰 EMERGENTE'})")
+                                    
+                                    # 5. Aplica filtros específicos do TIER
+                                    if is_tier_a:
+                                        # TIER A: Critérios normais
+                                        check = sandra_filters.check_tier_a_entry(
+                                            current_symbol, rsi_5m, rsi_15m, price, bb_lower, 
+                                            regime_btc, edge_liquido
+                                        )
+                                        
+                                        if not check['approved']:
+                                            print(f"🚫 SANDRA 3.1 TIER A: Rejeitado")
+                                            for reason in check['reasons']:
+                                                print(f"     {reason}")
+                                            
+                                            with state_lock:
+                                                lab_state.setdefault('last_decisions', {}).setdefault(current_symbol, {})
+                                                lab_state['last_decisions'][current_symbol].update({
+                                                    'buy_attempted': False,
+                                                    'buy_result': False,
+                                                    'block_reason': f"Sandra 3.1 TIER A: {'; '.join(check['reasons'])}",
+                                                })
+                                            continue
+                                        
+                                        # Aprovado!
+                                        print(f"✅ SANDRA 3.1 TIER A: APROVADO")
+                                        for reason in check['reasons']:
+                                            print(f"     {reason}")
+                                        if check['warnings']:
+                                            for warning in check['warnings']:
+                                                print(f"     {warning}")
+                                        
+                                        # Guarda dados Sandra 3.1 para usar no Telegram
+                                        with state_lock:
+                                            lab_state.setdefault('sandra_data', {})[current_symbol] = {
+                                                'rsi_5m': rsi_5m,
+                                                'rsi_15m': rsi_15m,
+                                                'edge_liquido': edge_liquido,
+                                                'regime_btc': regime_btc,
+                                                'tier': 'A'
+                                            }
+                                    
+                                    else:
+                                        # TIER B: Critérios EXTREMOS
+                                        check = sandra_filters.check_tier_b_entry(
+                                            current_symbol, rsi_5m, rsi_15m, price, bb_lower,
+                                            regime_btc, edge_liquido, volume_24h, 
+                                            edge_data.get('spread_bps', 15.0)
+                                        )
+                                        
+                                        if not check['approved']:
+                                            print(f"🚫 SANDRA 3.1 TIER B: REJEITADO")
+                                            for violation in check['violations']:
+                                                print(f"     {violation}")
+                                            
+                                            with state_lock:
+                                                lab_state.setdefault('last_decisions', {}).setdefault(current_symbol, {})
+                                                lab_state['last_decisions'][current_symbol].update({
+                                                    'buy_attempted': False,
+                                                    'buy_result': False,
+                                                    'block_reason': f"Sandra 3.1 TIER B: {'; '.join(check['violations'])}",
+                                                })
+                                            continue
+                                        
+                                        # Aprovado (raro!)
+                                        print(f"✅ SANDRA 3.1 TIER B: APROVADO (EXCEÇÃO RARA)")
+                                        for reason in check['reasons']:
+                                            print(f"     {reason}")
+                                        
+                                        # Guarda dados Sandra 3.1 para usar no Telegram
+                                        with state_lock:
+                                            lab_state.setdefault('sandra_data', {})[current_symbol] = {
+                                                'rsi_5m': rsi_5m,
+                                                'rsi_15m': rsi_15m,
+                                                'edge_liquido': edge_liquido,
+                                                'regime_btc': regime_btc,
+                                                'tier': 'B'
+                                            }
                                     
                                     # 🧠 LÓGICA SÁBIA: Bloqueia recompra após SL se tendência de baixa for forte
                                     with state_lock:
