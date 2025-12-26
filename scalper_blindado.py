@@ -124,6 +124,18 @@ def analisar_sinal_hibrido(candles_raw, symbol_name="UNKNOWN"):
         
         # 🧠 INTELIGÊNCIA: ATR em % do preço (para SL dinâmico)
         atr_pct = (atr / price * 100) if price > 0 and atr > 0 else 0.0
+        
+        # 🧠 TENDÊNCIA: EMA 50 vs EMA 200 (mercado de alta ou baixa?)
+        try:
+            df['EMA50'] = ta.ema(df['close'], length=50)
+            df['EMA200'] = ta.ema(df['close'], length=200)
+            ema50 = float(df['EMA50'].iloc[-1]) if not pd.isna(df['EMA50'].iloc[-1]) else price
+            ema200 = float(df['EMA200'].iloc[-1]) if not pd.isna(df['EMA200'].iloc[-1]) else price
+            tendencia_alta = ema50 > ema200  # True = mercado de alta
+        except Exception:
+            ema50 = price
+            ema200 = price
+            tendencia_alta = True  # Default: otimista
 
         dados = {
             'price': price,
@@ -137,6 +149,9 @@ def analisar_sinal_hibrido(candles_raw, symbol_name="UNKNOWN"):
             'vol_avg': vol_avg,  # Novo: Volume médio
             'vol_ratio': vol_ratio,  # Novo: Ratio do volume
             'tier': config.get('TIPO'),
+            'ema50': ema50,  # 🆕 EMA 50
+            'ema200': ema200,  # 🆕 EMA 200
+            'tendencia_alta': tendencia_alta,  # 🆕 Mercado em alta?
         }
 
         if pd.isna(price) or pd.isna(rsi):
@@ -147,6 +162,11 @@ def analisar_sinal_hibrido(candles_raw, symbol_name="UNKNOWN"):
 
         if adx > config['ADX_MAXIMO']:
             return False, f"Tendência Extrema (ADX {adx:.1f} > {config['ADX_MAXIMO']})", dados
+        
+        # 🛡️ FILTRO 3: NÃO COMPRAR EM QUEDA LIVRE (EMA 50 abaixo de EMA 200)
+        # Exceção: moedas ELITE podem comprar em qualquer condição (recuperam rápido)
+        if not eh_forte and not tendencia_alta:
+            return False, f"⚠️ TENDÊNCIA DE BAIXA (EMA50 < EMA200) - Aguardando reversão", dados
 
         return True, f"ENTRADA {config['TIPO']} APROVADA", dados
 

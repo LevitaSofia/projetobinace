@@ -3236,6 +3236,45 @@ def trading_loop():
                             current_balance = lab_state.get('real_balance', 0.0)
                         print(f"🔎 {current_symbol}: RSI={rsi:.1f} | Preço=${price:.2f} | Saldo=${current_balance:.2f}")
                         
+                        # 🛡️ FILTRO 1: VARIAÇÃO 24H (não comprar moedas em sangria)
+                        try:
+                            ticker_24h = ex(exchange.fetch_ticker, current_symbol)
+                            var_24h = ticker_24h.get('percentage', 0.0)  # % de variação 24h
+                            volume_24h = ticker_24h.get('quoteVolume', 0.0)  # Volume em USDT
+                            
+                            # Rejeitar se caiu mais de -10% no dia (sangramento)
+                            if var_24h < -10.0:
+                                print(f"🚫 FILTRO SEGURANÇA: {current_symbol} em SANGRIA ({var_24h:.2f}% no dia) - REJEITADO")
+                                with state_lock:
+                                    lab_state.setdefault('last_decisions', {}).setdefault(current_symbol, {})
+                                    lab_state['last_decisions'][current_symbol].update({
+                                        'buy_attempted': False,
+                                        'buy_result': False,
+                                        'block_reason': f'Filtro Segurança: Queda de {var_24h:.2f}% em 24h',
+                                    })
+                                continue
+                            
+                            # 🛡️ FILTRO 2: VOLUME MÍNIMO (liquidez)
+                            # Moedas com volume < $100k são perigosas (pouca liquidez)
+                            MIN_VOLUME_24H = 100000  # $100k USD
+                            if volume_24h < MIN_VOLUME_24H:
+                                print(f"🚫 FILTRO LIQUIDEZ: {current_symbol} com volume baixo (${volume_24h:,.0f}) - REJEITADO")
+                                with state_lock:
+                                    lab_state.setdefault('last_decisions', {}).setdefault(current_symbol, {})
+                                    lab_state['last_decisions'][current_symbol].update({
+                                        'buy_attempted': False,
+                                        'buy_result': False,
+                                        'block_reason': f'Filtro Liquidez: Volume 24h = ${volume_24h:,.0f} < ${MIN_VOLUME_24H:,}',
+                                    })
+                                continue
+                            
+                            # ✅ Moeda APROVADA nos filtros de mercado
+                            print(f"✅ {current_symbol} passou nos filtros: {var_24h:+.2f}% no dia | Vol: ${volume_24h:,.0f}")
+                            
+                        except Exception as e:
+                            # Se falhar ao buscar ticker, permite continuar (não bloqueia por erro)
+                            print(f"⚠️ Erro ao buscar ticker 24h de {current_symbol}: {e}")
+                        
                         if sinal_compra_blindado:
                             print(f"🧠 SCALPER BLINDADO APROVOU: {motivo_blindado}")
 
@@ -4400,6 +4439,68 @@ def close_position():
 
     except Exception as e:
         print(f"❌ Erro na venda forçada: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/sync_positions', methods=['POST'])
+def sync_positions():
+    """🔄 SINCRONIZAR POSIÇÕES - Remove posições do sistema que não existem mais na Binance."""
+    _require_api_token_if_configured()
+    if not exchange:
+        return jsonify({'success': False, 'error': 'Exchange não conectada'}), 400
+
+    try:
+        print("🔄 Iniciando sincronização de posições...")
+        
+        # 1. Buscar saldos reais na Binance
+        balance = ex(exchange.fetch_balance)
+        real_balances = {}
+        
+        for coin, amount in balance.get('free', {}).items():
+            if amount > 0 and coin not in ['USDT', 'BRL', 'USD', 'EUR']:
+                real_balances[f"{coin}/USDT"] = amount
+        
+        print(f"💰 Binance tem {len(real_balances)} moedas: {list(real_balances.keys())}")
+        
+        # 2. Buscar posições no sistema
+        with state_lock:
+            selected = lab_state['selected_strategy']
+            strategy = lab_state['strategies'][selected]
+            system_positions = dict(strategy.get('positions', {}))
+        
+        print(f"📊 Sistema tem {len(system_positions)} posições: {list(system_positions.keys())}")
+        
+        # 3. Encontrar posições fantasmas (no sistema mas não na Binance)
+        removed = []
+        for symbol in list(system_positions.keys()):
+            if symbol not in real_balances:
+                print(f"🗑️  Removendo posição fantasma: {symbol}")
+                with state_lock:
+                    if symbol in strategy['positions']:
+                        del strategy['positions'][symbol]
+                    # Atualiza posição principal
+                    if strategy.get('position', {}).get('symbol') == symbol:
+                        # Pega a primeira posição restante, se houver
+                        if strategy['positions']:
+                            first_symbol = next(iter(strategy['positions']))
+                            strategy['position'] = strategy['positions'][first_symbol]
+                        else:
+                            strategy['position'] = None
+                removed.append(symbol)
+        
+        if removed:
+            save_lab_data()
+            msg = f"🔄 Sincronização concluída!\nRemovidas {len(removed)} posições fantasmas: {', '.join(removed)}"
+            print(msg)
+            send_telegram_message(msg)
+            return jsonify({'success': True, 'message': msg, 'removed': removed})
+        else:
+            msg = "✅ Sistema já sincronizado com Binance!"
+            print(msg)
+            return jsonify({'success': True, 'message': msg, 'removed': []})
+    
+    except Exception as e:
+        print(f"❌ Erro na sincronização: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
