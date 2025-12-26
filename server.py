@@ -1946,6 +1946,108 @@ def get_diagnostic(strategy_name, price, rsi, bb_lower, position=None):
     return "⏳ " + " | ".join(issues)
 
 
+def get_ai_context_data():
+    """
+    🧠 FUNÇÃO HELPER PARA IA (Telegram/OpenAI)
+    
+    Retorna um dicionário completo com TODOS os dados que a IA precisa consultar.
+    Isso garante que a Sandra SEMPRE use valores dinâmicos (nunca fixos).
+    
+    Returns:
+        dict: Contexto completo incluindo:
+            - Sentimento do mercado (F&G Index)
+            - SL/TP dinâmicos de todas as posições
+            - Fator de juro composto
+            - Saldo atual
+            - Posições abertas com seus SL/TP
+    """
+    with state_lock:
+        # 1. Sentimento do Mercado (Fear & Greed Index)
+        market_sentiment = lab_state.get('market_sentiment', {})
+        sentiment = market_sentiment.get('sentiment', 'DESCONHECIDO')
+        fng_value = market_sentiment.get('fng_value', 50)
+        
+        # 2. Juro Composto
+        compound_data = lab_state.get('compound_interest', {})
+        fator_escala = compound_data.get('fator_escala', 1.0)
+        saldo_atual = lab_state.get('real_balance', 0.0)
+        
+        # 3. Posições Abertas (com SL/TP dinâmicos)
+        strategy_key = lab_state.get('selected_strategy', 'aggressive')
+        strategy = lab_state['strategies'][strategy_key]
+        positions = strategy.get('positions', {})
+        
+        # Formata posições com SL/TP
+        positions_info = {}
+        for symbol, pos in positions.items():
+            sl_dinamico = pos.get('sl_dinamico')
+            tp_dinamico = pos.get('tp_dinamico')
+            
+            # Se não tem dinâmico, usa fixo (mas indica que é fixo)
+            if sl_dinamico is None:
+                sl_usado = SANDRA.get('STOP_BASE', -3.0)
+                sl_tipo = "FIXO"
+            else:
+                sl_usado = sl_dinamico
+                sl_tipo = "DINÂMICO"
+                
+            if tp_dinamico is None:
+                tp_usado = SANDRA.get('TP_SLOW', 5.0)
+                tp_tipo = "FIXO"
+            else:
+                tp_usado = tp_dinamico
+                tp_tipo = "DINÂMICO"
+            
+            positions_info[symbol] = {
+                'entry_price': pos.get('entry_price'),
+                'qty': pos.get('qty'),
+                'entry_time': pos.get('entry_time'),
+                'sl_pct': sl_usado,
+                'sl_tipo': sl_tipo,
+                'tp_pct': tp_usado,
+                'tp_tipo': tp_tipo,
+                'entry_rsi': pos.get('entry_rsi'),
+            }
+        
+        # 4. Indicadores de Mercado (últimas leituras)
+        market_overview = lab_state.get('market_overview', {})
+        
+        # Monta contexto completo
+        context = {
+            # Sentimento
+            'sentimento': sentiment,
+            'fear_greed_index': fng_value,
+            'sentimento_descricao': (
+                "PÂNICO (oportunidade de compra)" if sentiment == "BEAR" else
+                "NEUTRO (mercado equilibrado)" if sentiment == "NEUTRO" else
+                "GANÂNCIA (cuidado com topos)"
+            ),
+            
+            # Juro Composto
+            'fator_juro_composto': fator_escala,
+            'saldo_atual': saldo_atual,
+            'saldo_base': SALDO_BASE,
+            'aposta_base_escalada': 11.0 * fator_escala,
+            
+            # Posições
+            'posicoes_abertas': positions_info,
+            'num_posicoes': len(positions_info),
+            
+            # Mercado
+            'indicadores_por_moeda': market_overview,
+            
+            # Configuração Atual
+            'sandra_config': {
+                'ENTRY_RSI': SANDRA.get('ENTRY_RSI', 35),
+                'STOP_BASE': SANDRA.get('STOP_BASE', -3.0),
+                'TP_SLOW': SANDRA.get('TP_SLOW', 5.0),
+                'USE_DYNAMIC_RISK': SANDRA.get('USE_DYNAMIC_RISK', False),
+            }
+        }
+        
+        return context
+
+
 def check_exit_signal(position, current_price, rsi, bb_upper=None, strategy_name=None):
     """
     🧠 SAÍDA INTELIGENTE com IA DINÂMICA (ATR + ADX + Sentimento).
@@ -2984,6 +3086,18 @@ def trading_loop():
             # MULTI: sempre varre a WATCHLIST inteira
             target_coins = list(WATCHLIST)
             
+            # 🧠 ATUALIZA SENTIMENTO DO MERCADO (F&G Index) - Armazena no lab_state para IA consultar
+            try:
+                sentiment, fng_value = ceo_manager.get_market_sentiment()
+                with state_lock:
+                    lab_state['market_sentiment'] = {
+                        'sentiment': sentiment,  # "BEAR", "NEUTRO", "BULL"
+                        'fng_value': fng_value,  # 0-100
+                        'last_update': now_iso()
+                    }
+            except Exception as e:
+                print(f"⚠️ Erro ao atualizar sentimento: {e}")
+            
             # ATUALIZA SALDO ANTES de verificar sinais de compra
             if exchange and API_KEY:
                 try:
@@ -2996,6 +3110,16 @@ def trading_loop():
                         lab_state.setdefault('user_info', {})
                         lab_state['user_info']['usdt_free'] = usdt_free
                         lab_state['user_info']['usdt_total'] = usdt_total
+                        
+                        # 💰 ATUALIZA FATOR DE JURO COMPOSTO
+                        saldo_atual = usdt_free
+                        fator_escala = max(1.0, saldo_atual / SALDO_BASE)
+                        lab_state['compound_interest'] = {
+                            'saldo_base': SALDO_BASE,
+                            'saldo_atual': saldo_atual,
+                            'fator_escala': fator_escala,
+                            'last_update': now_iso()
+                        }
                 except Exception as e:
                     print(f"⚠️ Erro ao atualizar saldo: {e}")
 
@@ -3455,6 +3579,44 @@ def api_status():
         })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/ai_context')
+def api_ai_context():
+    """
+    🧠 ENDPOINT PARA IA (Telegram/OpenAI/Sandra)
+    
+    Retorna contexto completo com dados dinâmicos que a IA deve consultar.
+    Garante que a IA NUNCA use valores fixos hardcoded.
+    
+    Uso:
+        GET /api/ai_context
+        
+    Retorna:
+        {
+            "sentimento": "BEAR",
+            "fear_greed_index": 25,
+            "sentimento_descricao": "PÂNICO (oportunidade de compra)",
+            "fator_juro_composto": 2.5,
+            "saldo_atual": 250.00,
+            "aposta_base_escalada": 27.50,
+            "posicoes_abertas": {
+                "BTC/USDT": {
+                    "sl_pct": -2.5,
+                    "sl_tipo": "DINÂMICO",
+                    "tp_pct": 5.2,
+                    "tp_tipo": "DINÂMICO"
+                }
+            },
+            ...
+        }
+    """
+    try:
+        context = get_ai_context_data()
+        return jsonify(context)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 
 @app.route('/api/positions')
 def api_positions():
