@@ -2326,6 +2326,37 @@ def _gerar_justificativa_compra(symbol, rsi, buy_price, buy_qty, buy_total, taxa
         from scalper_blindado import MOEDAS_FORTES
         tier = "👑 ELITE (Forte)" if coin in MOEDAS_FORTES else "🎰 ALTCOIN (Arriscada)"
         
+        # 🚨 ALERTA ESPECIAL: Major com RSI extremo
+        TIER_A_SYMBOLS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BNB/USDT']
+        is_major = symbol in TIER_A_SYMBOLS
+        alerta_major = ""
+        
+        if is_major and rsi < 20:
+            alerta_major = f"""
+🚨🚨🚨 *OPORTUNIDADE EXTREMA* 🚨🚨🚨
+
+*{coin} COM RSI {rsi:.1f}!!!*
+
+Este é um RSI EXTREMAMENTE BAIXO em uma MAJOR!
+Historicamente, RSI < 20 em BTC/ETH gera reversões fortes.
+PRIORIDADE ABSOLUTA sobre qualquer altcoin.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+"""
+        elif is_major and rsi < 25:
+            alerta_major = f"""
+🔥 *OPORTUNIDADE FORTE* 🔥
+
+*{coin} com RSI {rsi:.1f}*
+
+Major em sobrevenda forte!
+Prioridade sobre altcoins.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+"""
+        
         # Busca dados técnicos do market_overview
         market_data = lab_state.get('market_overview', {}).get(symbol, {})
         adx = market_data.get('adx', 0.0)
@@ -2418,7 +2449,8 @@ def _gerar_justificativa_compra(symbol, rsi, buy_price, buy_qty, buy_total, taxa
             confluencia += "→ Sinal fraco"
         
         # Monta mensagem completa
-        msg = f"🚨 *DECISÃO DA IA: NOVA POSIÇÃO* 🚨\n\n"
+        msg = f"{alerta_major}"  # Alerta especial se for major com RSI baixo
+        msg += f"🚨 *DECISÃO DA IA: NOVA POSIÇÃO* 🚨\n\n"
         msg += f"🪙 *Ativo:* {symbol} ({tier})\n"
         msg += f"✅ *Ação:* COMPRA\n"
         msg += f"💵 *Preço:* ${buy_price:.4f}\n"
@@ -3258,6 +3290,42 @@ def trading_loop():
                         with state_lock:
                             current_balance = lab_state.get('real_balance', 0.0)
                         print(f"🔎 {current_symbol}: RSI={rsi:.1f} | Preço=${price:.2f} | Saldo=${current_balance:.2f}")
+                        
+                        # 🏆 PRIORIDADE ABSOLUTA: Majors em oportunidade extrema bloqueiam altcoins
+                        TIER_A_SYMBOLS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BNB/USDT']
+                        is_tier_a = current_symbol in TIER_A_SYMBOLS
+                        
+                        # Se esta moeda NÃO é TIER A, verifica se algum major tem RSI < 20 (oportunidade extrema)
+                        if not is_tier_a:
+                            try:
+                                major_opportunity = False
+                                for major_symbol in TIER_A_SYMBOLS:
+                                    try:
+                                        klines = ex(exchange.fetch_ohlcv, major_symbol, TIMEFRAME, limit=50)
+                                        if klines and len(klines) >= 14:
+                                            df_major = pd.DataFrame(klines, columns=['time', 'open', 'high', 'low', 'close', 'volume'])
+                                            rsi_major = float(ta.rsi(df_major['close'], length=RSI_PERIOD).iloc[-1])
+                                            
+                                            if rsi_major < 20:
+                                                major_opportunity = True
+                                                print(f"🚨 PRIORIDADE MAJOR: {major_symbol} com RSI {rsi_major:.1f} < 20")
+                                                print(f"🚫 BLOQUEANDO: {current_symbol} (altcoin) - MAJORS TÊM PRIORIDADE!")
+                                                
+                                                with state_lock:
+                                                    lab_state.setdefault('last_decisions', {}).setdefault(current_symbol, {})
+                                                    lab_state['last_decisions'][current_symbol].update({
+                                                        'buy_attempted': False,
+                                                        'buy_result': False,
+                                                        'block_reason': f'Prioridade Major: {major_symbol} RSI={rsi_major:.1f} < 20',
+                                                    })
+                                                break
+                                    except Exception as e_major:
+                                        continue
+                                
+                                if major_opportunity:
+                                    continue  # Pula esta altcoin e vai para próxima moeda do loop
+                            except Exception as e:
+                                print(f"⚠️ Erro ao verificar prioridade majors: {e}")
                         
                         # 🛡️ FILTRO 1: VARIAÇÃO 24H (não comprar moedas em sangria)
                         try:
