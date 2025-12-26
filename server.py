@@ -2855,6 +2855,11 @@ def execute_real_trade(action, price, symbol, reason=None, amount_usdt=None):
                     except Exception:
                         pass
                     strategy['position'] = None
+                    
+                    # 🧠 LÓGICA SÁBIA: Registra SL para bloqueio inteligente de recompra
+                    if reason and "STOP" in reason.upper():
+                        strategy.setdefault('last_sl_time', {})[symbol] = time.time()
+                        print(f"⛔ STOP LOSS registrado para {symbol} - Cooldown estendido ativado")
 
                 # Histórico eterno (SQLite) + backup do DB após venda
                 try:
@@ -3262,6 +3267,41 @@ def trading_loop():
                                 
                                 # Se o Scalper Blindado der sinal VERDADEIRO, entramos!
                                 if sinal_compra_blindado and not btc_bleeding:
+                                    
+                                    # 🧠 LÓGICA SÁBIA: Bloqueia recompra após SL se tendência de baixa for forte
+                                    with state_lock:
+                                        last_sl_times = strategy.get('last_sl_time', {})
+                                        if current_symbol in last_sl_times:
+                                            last_sl_time = last_sl_times[current_symbol]
+                                            current_time = time.time()
+                                            time_since_sl = current_time - last_sl_time
+                                            
+                                            # Cooldown de 4 horas (14400 segundos)
+                                            COOLDOWN_ESTENDIDO = 4 * 3600  # 4 horas
+                                            
+                                            if time_since_sl < COOLDOWN_ESTENDIDO:
+                                                # Verifica ADX (força da tendência)
+                                                adx_atual = indicadores.get('adx', 0.0)
+                                                
+                                                if adx_atual > 25:
+                                                    # Bloqueio inteligente ativado
+                                                    tempo_restante_min = (COOLDOWN_ESTENDIDO - time_since_sl) / 60
+                                                    print(f"⛔ BLOQUEIO SÁBIO: {current_symbol}")
+                                                    print(f"   • SL recente há {time_since_sl/60:.0f} min")
+                                                    print(f"   • ADX={adx_atual:.1f} (tendência forte de baixa)")
+                                                    print(f"   • Cooldown restante: {tempo_restante_min:.0f} min")
+                                                    
+                                                    with state_lock:
+                                                        lab_state.setdefault('last_decisions', {}).setdefault(current_symbol, {})
+                                                        lab_state['last_decisions'][current_symbol].update({
+                                                            'buy_attempted': False,
+                                                            'buy_result': False,
+                                                            'block_reason': f'Bloqueio Sábio: SL recente + Tendência Forte (ADX={adx_atual:.1f})',
+                                                        })
+                                                    
+                                                    # Pula para próxima moeda
+                                                    continue
+                                    
                                     # 🧠 IA DINÂMICA: Calcula tamanho da aposta baseado em confluências
                                     try:
                                         rsi_val = indicadores.get('rsi', 50)
