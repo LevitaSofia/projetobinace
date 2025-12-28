@@ -16,8 +16,10 @@ backups/
 *.pid
 
 # Logs
+# Logs
 *.log
-sistema_trading.log
+logs/*
+!logs/.gitkeep
 
 # Python
 __pycache__/

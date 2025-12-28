@@ -508,28 +508,62 @@
 
                 let html = '';
                 data.forEach(pos => {
-                    const pnlClass = pos.profit_pct >= 0 ? 'text-success' : 'text-danger';
-                    const pnlIcon = pos.profit_pct >= 0 ? 'bi-graph-up-arrow' : 'bi-graph-down-arrow';
+                    const pnlClass = pos.net_profit >= 0 ? 'text-success' : 'text-danger';
+                    const pnlIcon = pos.net_profit >= 0 ? 'bi-graph-up-arrow' : 'bi-graph-down-arrow';
+
+                    // Formata Data/Hora
+                    let timeStr = 'Recente';
+                    if (pos.entry_time) {
+                        try {
+                            const dateObj = new Date(pos.entry_time);
+                            timeStr = dateObj.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' }) + ' ' +
+                                dateObj.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+                        } catch (e) { timeStr = pos.entry_time; }
+                    }
+
+                    // Cor do RSI
+                    let rsiClass = 'text-muted';
+                    const rsiVal = parseFloat(pos.rsi || 50);
+                    if (rsiVal <= 30) rsiClass = 'text-success fw-bold';
+                    else if (rsiVal >= 70) rsiClass = 'text-danger fw-bold';
 
                     html += `
-                        <div class="list-group-item bg-transparent border-bottom border-secondary text-light p-3">
+                        <div class="list-group-item bg-dark border border-secondary text-light p-3 mb-2 shadow-sm">
+                            
+                            <!-- ROW 1: Símbolo e Botão Vender (Extremos) -->
                             <div class="d-flex justify-content-between align-items-center mb-2">
-                                <span class="fw-bold text-warning">${pos.symbol}</span>
-                                <span class="badge bg-dark border border-secondary text-muted" style="font-size: 0.7rem">${pos.strategy}</span>
+                                <span class="fw-bold text-warning fs-5">${pos.symbol}</span>
+                                <button class="btn btn-sm btn-outline-danger" onclick="closePosition('${pos.symbol}')" title="Vender Agora Manualmente">
+                                    VENDER <i class="bi bi-x-lg"></i>
+                                </button>
                             </div>
-                            <div class="d-flex justify-content-between small">
-                                <span class="text-muted">Entrada:</span>
-                                <span>$${parseFloat(pos.entry_price).toFixed(4)}</span>
+
+                            <!-- ROW 2: Info Secundária (Data e RSI) -->
+                            <div class="d-flex align-items-center mb-3">
+                                <span class="badge bg-secondary me-2" style="font-size: 0.7rem">${timeStr}</span>
+                                <span class="badge border border-secondary text-light">RSI: <span class="${rsiClass}">${rsiVal.toFixed(1)}</span></span>
                             </div>
-                            <div class="d-flex justify-content-between small">
-                                <span class="text-muted">Atual:</span>
-                                <span>$${parseFloat(pos.current_price).toFixed(4)}</span>
+                            
+                            <!-- ROW 3: Preços -->
+                            <div class="row g-1 small mb-2 border-top border-secondary pt-2">
+                                <div class="col-6 text-muted">Preço Pago:</div>
+                                <div class="col-6 text-end fw-bold">$${parseFloat(pos.entry_price).toFixed(4)}</div>
+                                
+                                <div class="col-6 text-muted">Preço Atual:</div>
+                                <div class="col-6 text-end text-light">$${parseFloat(pos.current_price).toFixed(4)}</div>
                             </div>
-                            <div class="d-flex justify-content-between align-items-center mt-2 pt-2 border-top border-dark">
-                                <span class="small text-muted">PnL:</span>
-                                <span class="fw-bold ${pnlClass}">
-                                    <i class="bi ${pnlIcon}"></i> ${parseFloat(pos.profit_pct).toFixed(2)}%
-                                </span>
+
+                            <!-- ROW 4: Lucro Líquido -->
+                            <div class="d-flex justify-content-between align-items-center pt-2 border-top border-secondary bg-dark bg-opacity-25 mt-1 rounded p-1">
+                                <span class="small text-muted fw-bold">LUCRO LÍQUIDO:</span>
+                                <div class="text-end">
+                                    <div class="fw-bold fs-5 ${pnlClass}">
+                                        ${parseFloat(pos.net_profit) >= 0 ? '+' : ''}$${parseFloat(pos.net_profit).toFixed(2)}
+                                    </div>
+                                    <div class="small ${pnlClass}" style="font-size: 0.75rem">
+                                        (${parseFloat(pos.profit_pct).toFixed(2)}%)
+                                    </div>
+                                </div>
                             </div>
                         </div>
                     `;
@@ -629,6 +663,27 @@
                 alert(data.message || 'Comando executado!');
             } catch (e) {
                 alert(`Erro ao enviar comando: ${e?.message || e}`);
+            }
+        }
+
+        async function closePosition(symbol) {
+            if (!confirm(`VENDA MANUAL: Tem certeza que deseja vender ${symbol} a mercado agora?`)) return;
+            try {
+                const res = await fetch(`/api/close_position`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ symbol: symbol })
+                });
+                const data = await res.json();
+
+                if (data.success) {
+                    alert(`✅ Venda de ${symbol} solicitada com sucesso!`);
+                    fetchPositions(); // Atualiza lista
+                } else {
+                    alert(`❌ Erro ao vender: ${data.error}`);
+                }
+            } catch (e) {
+                alert(`Erro de conexão: ${e.message}`);
             }
         }
 

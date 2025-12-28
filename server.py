@@ -2,7 +2,7 @@
 
 SANDRA_PROMPT = """PROMPT DA IA – MODO ASSESSORA FINANCEIRA (CEO do Sistema)
 
-Você é a Sandra, a Gerente Executiva e Assessora Financeira do Jonatas.
+Você é a Sandra 3.1, a Gerente Executiva e Assessora Financeira do Jonatas.
 Sua missão é gerenciar o capital com precisão cirúrgica e fornecer dados exatos sempre que solicitada.
 
 PERFIL:
@@ -33,7 +33,6 @@ import time
 import random
 import re
 import threading
-import tempfile
 import copy
 import queue
 import sqlite3
@@ -44,7 +43,6 @@ from dotenv import load_dotenv
 import ccxt
 import numpy as np
 import requests
-import asyncio
 import io
 import matplotlib
 matplotlib.use('Agg') # Backend não interativo
@@ -91,7 +89,7 @@ logging.getLogger('telegram').setLevel(logging.WARNING)
 
 _root_logger = logging.getLogger()
 _rot_handler = RotatingFileHandler(
-    'sistema_trading.log',
+    'logs/sistema_trading.log',
     maxBytes=5_000_000,
     backupCount=5,
     encoding='utf-8'
@@ -110,6 +108,9 @@ state_lock = threading.RLock()
 
 # Lock dedicado para serializar chamadas no mesmo client CCXT (evita race/nonce/rate-limit)
 exchange_lock = threading.RLock()
+
+# Lock para proteger SANDRA e WATCHLIST de modificações concorrentes
+config_lock = threading.RLock()
 
 
 def ex(fn, *args, **kwargs):
@@ -230,6 +231,9 @@ def add_no_cache_headers(response):
     response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
     response.headers['Pragma'] = 'no-cache'
     response.headers['Expires'] = '0'
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-Frame-Options'] = 'DENY'
+    response.headers['X-XSS-Protection'] = '1; mode=block'
     return response
 
 # Configurações
@@ -1660,33 +1664,35 @@ def get_min_notional_usdt(symbol: str, fallback: float = 10.0) -> float:
 
 # === CONFIG SANDRA MODE CENTRALIZADO ===
 SANDRA = {
-    "BASE_BET": 11.0,
-    "BET_STRONG": 22.0,
-    "BET_GOLD": 33.0,
-    "BET_DRAWDOWN": 8.0,
-    "MAX_BET": 33.0,
+    # 💰 BUDGET SANDRA 3.1 OTIMIZADA (1h + Majors First)
+    "BASE_BET": 15.0,       # Base aumentada para 1h
+    "BET_STRONG": 30.0,     # Majors em oportunidade forte
+    "BET_GOLD": 45.0,       # Majors em oportunidade extrema
+    "BET_DRAWDOWN": 10.0,   # Proteção em drawdown
+    "MAX_BET": 45.0,        # Limite máximo aumentado
     
-    "ENTRY_RSI": 35,
-    "ENTRY_TOL": 0.01,  # 1%
-    "STRONG_RSI": 25,
-    "GOLD_RSI": 20,
-    "DRAWDOWN_RSI": 30,
+    # 📊 RSI AJUSTADO PARA TIMEFRAME 1h
+    "ENTRY_RSI": 40,        # 1h: RSI < 40 (mais conservador)
+    "ENTRY_TOL": 0.01,      # 1%
+    "STRONG_RSI": 32,       # 1h: RSI < 32 (oportunidade forte)
+    "GOLD_RSI": 28,         # 1h: RSI < 28 (oportunidade extrema)
+    "DRAWDOWN_RSI": 35,     # 1h: RSI < 35 em drawdown
     
-    "SELL_RSI": 65,
+    "SELL_RSI": 60,         # 1h: RSI > 60 (sobrecompra)
     
-    # 🧠 IA DINÂMICA: SL/TP são calculados por ATR + ADX + Sentimento
-    "STOP_BASE": -3.0,  # Fallback (se IA falhar)
-    "STOP_DRAWDOWN": -2.0,
-    "TP_SLOW": 5.0,  # Fallback (se IA falhar)
+    # 🧠 IA DINÂMICA: SL/TP ajustados para 1h (movimentos maiores)
+    "STOP_BASE": -3.5,      # SL base aumentado para 1h
+    "STOP_DRAWDOWN": -2.5,  # SL em drawdown
+    "TP_SLOW": 6.0,         # TP fallback aumentado para 1h
     
     # Valores dinâmicos calculados pela IA (atualizados por posição)
-    "STOP_DINAMICO": -1.8,  # Calculado por calcular_sl_dinamico()
-    "TP_DINAMICO": 4.0,  # Calculado por calcular_tp_dinamico()
+    "STOP_DINAMICO": -2.2,  # SL dinâmico aumentado
+    "TP_DINAMICO": 5.0,     # TP dinâmico aumentado para 1h
     "USE_DYNAMIC_RISK": True,  # Flag para ativar/desativar IA dinâmica
     
-    "FAST_PROFIT": 8.0,
+    "FAST_PROFIT": 10.0,    # Fast profit aumentado para 1h
     "FAST_WINDOW_S": 300,
-    "TRAIL_FAST": 3.0,
+    "TRAIL_FAST": 4.0,      # Trailing aumentado
 
     # Tempo máximo segurando posição (segundos). 24h por padrão.
     "MAX_HOLD_S": 24 * 60 * 60,
@@ -1792,8 +1798,8 @@ def fetch_raw_candles(symbol, interval='5m', limit=100):
         print(f"❌ Erro ao buscar dados raw ({symbol}): {e}")
         return []
 
-def fetch_market_data(symbol, interval='5m', limit=60):
-    """Busca dados de mercado no timeframe de sinal (5m) + volume."""
+def fetch_market_data(symbol, interval='1h', limit=60):
+    """Busca dados de mercado no timeframe de sinal (1h) + volume."""
     cache_key = f"{symbol}:{interval}:{limit}"
     now_mono = time.monotonic()
     with _market_cache_lock:
@@ -1883,17 +1889,19 @@ def update_sandra_streak(net_profit_usdt):
         # 2 perdas seguidas => aperta tudo
         if st["losses"] >= 2 and not st["tight"]:
             st["tight"] = True
-            SANDRA["ENTRY_RSI"] = 32
-            SANDRA["STOP_BASE"] = -2.5
-            SANDRA["ENTRY_TOL"] = 0.005
+            with config_lock:
+                SANDRA["ENTRY_RSI"] = 32
+                SANDRA["STOP_BASE"] = -2.5
+                SANDRA["ENTRY_TOL"] = 0.005
             tighten = True
 
         # 4 wins seguidas => solta pro padrão
         if st["tight"] and st["wins"] >= 4:
             st["tight"] = False
-            SANDRA["ENTRY_RSI"] = 35
-            SANDRA["STOP_BASE"] = -3.0
-            SANDRA["ENTRY_TOL"] = 0.01
+            with config_lock:
+                SANDRA["ENTRY_RSI"] = 35
+                SANDRA["STOP_BASE"] = -3.0
+                SANDRA["ENTRY_TOL"] = 0.01
             relax = True
 
     if tighten:
@@ -2253,7 +2261,8 @@ def convert_brl_to_usdt(min_brl=20):
                 with state_lock:
                     lab_state['real_balance'] = new_usdt
                 return new_usdt
-            except:
+            except Exception as e_conv:
+                logger.warning(f"Erro na conversão BRL→USDT: {e_conv}")
                 return usdt_balance
             
     except Exception as e:
@@ -2370,7 +2379,8 @@ Prioridade sobre altcoins.
         try:
             last_decision = lab_state.get('last_decisions', {}).get(symbol, {})
             scalper_reason = last_decision.get('scalper_reason', 'Análise técnica favorável')
-        except:
+        except Exception as e_decision:
+            logger.debug(f"Erro ao obter last_decision para {symbol}: {e_decision}")
             scalper_reason = reason or 'Análise técnica favorável'
         
         # Busca sentimento de mercado
@@ -2378,7 +2388,8 @@ Prioridade sobre altcoins.
             sentiment, fng_value = ceo_manager.get_market_sentiment()
             sentimento_emoji = "😨" if sentiment == "BEAR" else "😐" if sentiment == "NEUTRO" else "😁"
             sentimento_texto = f"{sentimento_emoji} {sentiment} (F&G: {fng_value})"
-        except:
+        except Exception as e_sentiment:
+            logger.debug(f"Erro ao obter sentimento de mercado: {e_sentiment}")
             sentimento_texto = "😐 NEUTRO (dados indisponíveis)"
         
         # Análise de tendência baseada em ADX
@@ -2998,17 +3009,25 @@ def detect_existing_positions():
                     strategy['positions'][pos_sym] = pos_old
                 strategy['position'] = None
 
-            # Se já tem posições registradas, não tenta restaurar
-            if strategy.get('positions'):
-                return
+            # 🔄 SYNC CONTÍNUO: Sempre verifica novas moedas (não apenas na primeira vez)
+            existing_symbols = set(strategy.get('positions', {}).keys())
         
-        # Procura por moedas na carteira que estão na WATCHLIST (até 3 posições)
+        # 🔍 Procura TODAS as moedas na carteira (não apenas WATCHLIST)
         restored = 0
-        for symbol in WATCHLIST:
-            coin = symbol.replace('/USDT', '')
-            coin_balance = balance['total'].get(coin, 0.0)
+        added = 0
+        
+        # Itera sobre TODAS as moedas com saldo > 0
+        for coin, coin_balance in balance['total'].items():
+            if coin in ['USDT', 'BRL', 'USD', 'EUR'] or coin_balance <= 0:
+                continue
             
-            if coin_balance > 0:
+            symbol = f"{coin}/USDT"
+            
+            # Pula se já está registrado
+            if symbol in existing_symbols:
+                continue
+            
+            try:
                 # Busca o preço atual
                 ticker = ex(exchange.fetch_ticker, symbol)
                 current_price = ticker['last']
@@ -3017,48 +3036,60 @@ def detect_existing_positions():
                 print(f"💰 Encontrado {coin}: {coin_balance:.8f} (${coin_value_usdt:.2f})")
                 
                 # Se tiver mais de $1 em valor, considera como posição aberta
-                if coin_value_usdt >= 1:
-                    # Estima o preço de entrada (usa o preço atual como fallback)
-                    # Idealmente pegaria do histórico de trades
+                if coin_value_usdt >= 1.0:
+                    # Busca preço de entrada do histórico
                     try:
-                        trades = ex(exchange.fetch_my_trades, symbol, None, None, 5)
+                        trades = ex(exchange.fetch_my_trades, symbol, None, None, 10)
                         if trades:
                             # Pega o último trade de compra
                             buy_trades = [t for t in trades if t['side'] == 'buy']
                             if buy_trades:
                                 entry_price = buy_trades[-1]['price']
+                                entry_time = buy_trades[-1]['datetime']
                             else:
                                 entry_price = current_price
+                                entry_time = now_iso()
                         else:
                             entry_price = current_price
-                    except:
+                            entry_time = now_iso()
+                    except Exception as e_trades:
+                        logger.debug(f"Erro ao obter trades para {symbol}: {e_trades}")
                         entry_price = current_price
+                        entry_time = now_iso()
                     
                     position = {
                         'entry_price': entry_price,
                         'qty': coin_balance,
-                        'entry_time': now_iso(),
+                        'entry_time': entry_time,
                         'symbol': symbol,
                         'highest_price': current_price,
                         'trail_active': False,
-                        # estimativa (sem histórico completo) para manter PnL coerente
-                        'entry_cost_usdt': float(current_price) * float(coin_balance),
-                        'entry_fee_usdt': float(current_price) * float(coin_balance) * FEE_RATE,
+                        'entry_cost_usdt': float(entry_price) * float(coin_balance),
+                        'entry_fee_usdt': float(entry_price) * float(coin_balance) * FEE_RATE,
                     }
+                    
                     with state_lock:
                         st = lab_state['strategies'][selected]
                         st.setdefault('positions', {})
-                        if symbol not in st['positions'] and len(st['positions']) < 3:
-                            st['positions'][symbol] = position
-                            if st.get('position') is None:
-                                st['position'] = position
-                            restored += 1
+                        st['positions'][symbol] = position
+                        if st.get('position') is None:
+                            st['position'] = position
+                        added += 1
                     
                     profit_pct = ((current_price - entry_price) / entry_price) * 100
-                    print(f"🔄 POSIÇÃO RESTAURADA: {coin_balance:.6f} {symbol} @ ${entry_price:.2f} (Lucro: {profit_pct:+.2f}%)")
-                    # Não envia Telegram aqui para não spammar
-                    if restored >= 3:
-                        return
+                    print(f"✅ POSIÇÃO DETECTADA: {coin_balance:.6f} {symbol} @ ${entry_price:.2f} (PnL: {profit_pct:+.2f}%)")
+                    restored += 1
+                    
+            except Exception as e:
+                # Símbolo não existe na Binance ou erro de API
+                print(f"⚠️ Erro ao processar {symbol}: {e}")
+                continue
+        
+        if added > 0:
+            save_lab_data()
+            msg = f"🔄 *SINCRONIZAÇÃO*\n\n{added} posição(ões) detectada(s) na carteira e adicionadas ao sistema!"
+            print(msg)
+            send_telegram_message(msg)
                     
     except Exception as e:
         print(f"⚠️ Erro ao detectar posições: {e}")
@@ -3163,6 +3194,17 @@ def trading_loop():
             # MULTI: sempre varre a WATCHLIST inteira
             target_coins = list(WATCHLIST)
             
+            # <--- CORREÇÃO RSI NO DASHBOARD --->
+            # Adiciona também as moedas que temos em carteira para atualizar o RSI delas (mesmo se saírem do watchlist)
+            with state_lock:
+                strategy_sel = lab_state.get('selected_strategy', 'aggressive')
+                st_data = lab_state['strategies'][strategy_sel]
+                open_positions = st_data.get('positions', {})
+                for sym_code in open_positions.keys():
+                    if sym_code not in target_coins:
+                        target_coins.append(sym_code)
+            # <--- FIM CORREÇÃO --->
+
             # 🧠 ATUALIZA SENTIMENTO DO MERCADO (F&G Index) - Armazena no lab_state para IA consultar
             try:
                 sentiment, fng_value = ceo_manager.get_market_sentiment()
@@ -3529,6 +3571,32 @@ def trading_loop():
                                         for reason in check['reasons']:
                                             print(f"     {reason}")
                                         
+                                        # 💰 VERIFICA BUDGET DISPONÍVEL PARA TIER B
+                                        # Reserva 90% do USDT para TIER A, só 10% para TIER B
+                                        with state_lock:
+                                            usdt_total = lab_state.get('real_balance', 0.0)
+                                        
+                                        BUDGET_TIER_B_PCT = 0.10  # 10% do USDT para TIER B
+                                        budget_tier_b_max = usdt_total * BUDGET_TIER_B_PCT
+                                        
+                                        if budget_tier_b_max < 5.0:
+                                            print(f"🚫 BUDGET TIER B: Apenas ${budget_tier_b_max:.2f} disponível (< $5.00)")
+                                            print(f"   • USDT total: ${usdt_total:.2f}")
+                                            print(f"   • 10% para TIER B: ${budget_tier_b_max:.2f}")
+                                            print(f"   • 90% reservado para TIER A: ${usdt_total * 0.90:.2f}")
+                                            print(f"   • BLOQUEANDO TIER B para preservar capital para majors")
+                                            
+                                            with state_lock:
+                                                lab_state.setdefault('last_decisions', {}).setdefault(current_symbol, {})
+                                                lab_state['last_decisions'][current_symbol].update({
+                                                    'buy_attempted': False,
+                                                    'buy_result': False,
+                                                    'block_reason': f'Budget TIER B insuficiente: ${budget_tier_b_max:.2f} < $5.00 (90% reservado para majors)',
+                                                })
+                                            continue
+                                        
+                                        print(f"✅ BUDGET TIER B OK: ${budget_tier_b_max:.2f} disponível de ${usdt_total:.2f}")
+                                        
                                         # Guarda dados Sandra 3.1 para usar no Telegram
                                         with state_lock:
                                             lab_state.setdefault('sandra_data', {})[current_symbol] = {
@@ -3536,7 +3604,8 @@ def trading_loop():
                                                 'rsi_15m': rsi_15m,
                                                 'edge_liquido': edge_liquido,
                                                 'regime_btc': regime_btc,
-                                                'tier': 'B'
+                                                'tier': 'B',
+                                                'budget_usado': budget_tier_b_max
                                             }
                                     
                                     # 🧠 LÓGICA SÁBIA: Bloqueia recompra após SL se tendência de baixa for forte
@@ -3598,6 +3667,17 @@ def trading_loop():
                                             atr_value=atr_val,
                                             base_bet=base_bet_escalada
                                         )
+                                        
+                                        # 💰 CAP TIER B: Máximo 10% do capital total (90% reservado para TIER A)
+                                        with state_lock:
+                                            sandra_data = lab_state.get('sandra_data', {}).get(current_symbol, {})
+                                        
+                                        if sandra_data.get('tier') == 'B':
+                                            budget_limit = sandra_data.get('budget_usado', 0)
+                                            if invest_amount > budget_limit:
+                                                print(f"⚠️ LIMITANDO TIER B: ${invest_amount:.2f} → ${budget_limit:.2f}")
+                                                print(f"   🔒 Preservando 90% (${saldo_atual * 0.9:.2f}) para TIER A (BTC/ETH/SOL/BNB)")
+                                                invest_amount = budget_limit
                                         
                                         if invest_amount >= 33.0:
                                             print(f"💎 🧠 IA: SINAL EXCEPCIONAL! Aposta ${invest_amount:.2f}")
@@ -3889,7 +3969,8 @@ def api_status():
             'timestamp': now_iso()
         })
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        logger.error(f"Erro em /api/status: {e}", exc_info=True)
+        return jsonify({'error': 'Erro ao obter status do sistema'}), 500
 
 
 @app.route('/api/ai_context')
@@ -3926,40 +4007,70 @@ def api_ai_context():
         context = get_ai_context_data()
         return jsonify(context)
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        logger.error(f"Erro em /api/status: {e}", exc_info=True)
+        return jsonify({'error': 'Erro ao obter status do sistema'}), 500
 
 
 @app.route('/api/positions')
 def api_positions():
-    """Retorna lista de posições ativas."""
+    """Retorna lista de posições ativas com dados detalhados (PnL líquido, Tempo, etc)."""
     try:
         positions_list = []
         strategies = lab_state.get('strategies', {})
         market = lab_state.get('market_overview', {})
         
+        # Taxa Binance (0.1% compra + 0.1% venda estimada)
+        FEE_RATE = 0.001
+
         def _append_pos(pos, strat_name):
             symbol = pos.get('symbol')
             if not symbol: return
             
-            # Evita duplicatas
+            # Evita duplicatas (mesmo símbolo na mesma estratégia)
             for p in positions_list:
                 if p['symbol'] == symbol and p['strategy'] == strat_name:
                     return
 
             entry_price = float(pos.get('entry_price', 0))
+            qty = float(pos.get('qty', 0))
+            entry_time = pos.get('entry_time', '')
+            
+            # Preço atual (market overview ou entry_price se falhar)
             current_price = 0.0
             if symbol in market:
                 current_price = float(market[symbol].get('price', 0))
+            if current_price == 0:
+                current_price = entry_price
+
+            # Cálculos Financeiros
+            gross_val = current_price * qty         # Valor bruto atual
+            cost_val = entry_price * qty            # Custo inicial
             
+            # Taxas (estimadas: pagou na entrada + vai pagar na saída)
+            total_fees = (cost_val * FEE_RATE) + (gross_val * FEE_RATE)
+            
+            # Lucro Líquido Real
+            net_profit = gross_val - cost_val - total_fees
+            
+            # Porcentagem (ROI)
             profit_pct = 0.0
-            if entry_price > 0 and current_price > 0:
-                profit_pct = ((current_price - entry_price) / entry_price) * 100
+            if cost_val > 0:
+                profit_pct = (net_profit / cost_val) * 100
             
+            # Dados Extras do Mercado (RSI)
+            current_rsi = 0.0
+            if symbol in market:
+                current_rsi = float(market[symbol].get('rsi', 0) or 0)
+
             positions_list.append({
                 'symbol': symbol,
                 'entry_price': entry_price,
                 'current_price': current_price,
+                'qty': qty,
+                'net_profit': net_profit,
                 'profit_pct': profit_pct,
+                'rsi': current_rsi,
+                'entry_time': entry_time,
                 'strategy': strat_name
             })
 
@@ -3978,7 +4089,8 @@ def api_positions():
                 
         return jsonify(positions_list)
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        logger.error(f"Erro em /api/status: {e}", exc_info=True)
+        return jsonify({'error': 'Erro ao obter status do sistema'}), 500
 
 @app.route('/api/watchlist')
 def api_watchlist():
@@ -3998,7 +4110,8 @@ def api_watchlist():
                 })
         return jsonify(data)
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        logger.error(f"Erro em /api/status: {e}", exc_info=True)
+        return jsonify({'error': 'Erro ao obter status do sistema'}), 500
 
 @app.route('/api/logs')
 def api_logs():
@@ -4017,36 +4130,46 @@ def api_chart(symbol_safe):
     """Retorna dados de candles para o gráfico."""
     try:
         symbol = symbol_safe.replace('_', '/')
-        # Aqui você precisaria ter o histórico de candles salvo ou buscar na hora
-        # Como exemplo, vamos retornar erro ou dados vazios se não tiver cache
-        # Se você tiver o 'market_overview' com histórico, use-o.
+        
+        # Validação: permitir apenas símbolos conhecidos
+        with config_lock:
+            allowed_symbols = WATCHLIST + ['BTC/USDT', 'ETH/USDT', 'BNB/USDT', 'SOL/USDT']
+        
+        if symbol not in allowed_symbols:
+            return jsonify({'error': 'Símbolo não permitido'}), 400
         
         # Mock de dados para teste visual (já que não temos histórico persistido fácil aqui)
         # Em produção, conecte com ccxt.fetch_ohlcv
         return jsonify({'candles': []}) 
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        logger.error(f"Erro em /api/chart: {e}", exc_info=True)
+        return jsonify({'error': 'Erro ao obter dados do gráfico'}), 500
 
 @app.route('/api/command/<cmd>', methods=['POST'])
 def api_command(cmd):
     """Executa comandos manuais."""
     _require_api_token_if_configured()
+    
+    # Validação: whitelist de comandos permitidos
+    ALLOWED_COMMANDS = ['report', 'daily_email']
+    if cmd not in ALLOWED_COMMANDS:
+        return jsonify({'status': 'error', 'message': 'Comando não permitido'}), 400
+    
     print(f"Comando recebido: {cmd}")
     db_record_event('command', f"Comando manual: {cmd}", data={'remote_addr': request.remote_addr})
     try:
         if cmd == 'report':
-            # Relatório de mercado via Telegram
             send_daily_report()
             return jsonify({'status': 'ok', 'command': cmd, 'message': 'Relatório Telegram disparado'})
 
         if cmd == 'daily_email':
             ok, msg = send_daily_email_report_now()
             return jsonify({'status': 'ok' if ok else 'error', 'command': cmd, 'message': msg}), (200 if ok else 400)
-
-        # Placeholder para outras ações
+        
         return jsonify({'status': 'executed', 'command': cmd})
     except Exception as e:
-        return jsonify({'status': 'error', 'command': cmd, 'error': str(e)}), 500
+        logger.error(f"Erro em /api/command/{cmd}: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': 'Erro ao executar comando'}), 500
 
 # Rotas da API
 @app.route('/')
@@ -4188,7 +4311,8 @@ def get_performance():
         })
         
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        logger.error(f"Erro em /api/status: {e}", exc_info=True)
+        return jsonify({'error': 'Erro ao obter status do sistema'}), 500
 
 
 @app.route('/api/send_report', methods=['POST'])
@@ -4209,7 +4333,8 @@ def get_report():
         report = generate_market_report()
         return jsonify({'report': report})
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        logger.error(f"Erro em /api/status: {e}", exc_info=True)
+        return jsonify({'error': 'Erro ao obter status do sistema'}), 500
 
 
 @app.route('/api/status')
@@ -4234,7 +4359,8 @@ def get_logs():
             
         return jsonify({'logs': [l.strip() for l in last_lines]})
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        logger.error(f"Erro em /api/status: {e}", exc_info=True)
+        return jsonify({'error': 'Erro ao obter status do sistema'}), 500
 
 
 @app.route('/api/position')
@@ -4631,24 +4757,40 @@ def force_buy():
 
 @app.route('/api/close_position', methods=['POST'])
 def close_position():
-    """⚡ VENDA FORÇADA - Vende a posição atual a mercado (Alias para force_sell no frontend)."""
+    """⚡ VENDA FORÇADA - Vende a posição atual a mercado (frontend)."""
     _require_api_token_if_configured()
     if not exchange:
         return jsonify({'success': False, 'error': 'Exchange não conectada'}), 400
 
     try:
+        target_symbol = request.json.get('symbol')  # Opcional: alvo específico
+        
         with state_lock:
             selected = lab_state['selected_strategy']
             strategy = lab_state['strategies'][selected]
             strategy.setdefault('positions', {})
-            # Compatibilidade: tenta usar a posição principal; senão, pega a primeira do dict
-            position = strategy.get('position')
-            if not position and strategy.get('positions'):
-                first_symbol = next(iter(strategy['positions']))
-                position = strategy['positions'].get(first_symbol)
+            
+            position = None
+            
+            # 1. Se veio símbolo, busca especificamente
+            if target_symbol:
+                # Procura no dict positions
+                position = strategy['positions'].get(target_symbol)
+                # Fallback: procura no singular
+                if not position and strategy.get('position', {}).get('symbol') == target_symbol:
+                    position = strategy.get('position')
+            
+            # 2. Se não achou (ou não veio símbolo), tenta pegar qualquer uma (fallback antigo)
+            if not position:
+                # Tenta singular
+                position = strategy.get('position')
+                # Tenta primeira do plural
+                if not position and strategy.get('positions'):
+                    first_symbol = next(iter(strategy['positions']))
+                    position = strategy['positions'].get(first_symbol)
 
             if not position:
-                return jsonify({'success': False, 'error': 'Nenhuma posição aberta para vender.'}), 400
+                return jsonify({'success': False, 'error': f'Nenhuma posição encontrada para venda ({target_symbol or "qualquer"}).'}), 400
 
             symbol = position.get('symbol')
             qty = float(position.get('qty', 0) or 0)
@@ -4808,43 +4950,95 @@ async def telegram_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def telegram_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         snap = get_public_snapshot()
-        balances = (snap.get('user_info', {}) or {}).get('balances', {}) or {}
-        msg = "💰 *SEU SALDO*\n\n"
         
-        # Se não tem saldo no cache, busca direto da API
-        if not balances:
-            try:
-                balance = cached_fetch_balance(ttl_s=5.0)
-                balances = {}
-                for asset, amount in balance['total'].items():
-                    if float(amount) > 0:
-                        balances[asset] = float(amount)
-            except: pass
+        # Tenta buscar saldo fresco da API
+        try:
+            balance_data = cached_fetch_balance(ttl_s=5.0)
+            balances = balance_data.get('total', {})
+        except:
+            balances = (snap.get('user_info', {}) or {}).get('balances', {}) or {}
+
+        msg = "💰 *SEU SALDO (ESTIMADO)*\n\n"
 
         if not balances:
             msg += "⚠️ Não foi possível ler o saldo da Binance."
+            await update.message.reply_text(msg, parse_mode='Markdown')
+            return
+
+        total_usdt_estimated = 0.0
+        details_msg = ""
+        
+        # 1. Pega saldo USDT e BRL primeiro
+        usdt_free = float(balances.get('USDT', 0.0))
+        brl_free = float(balances.get('BRL', 0.0))
+        
+        # Adiciona USDT líquido ao total
+        total_usdt_estimated += usdt_free
+        
+        # Tenta obter cotação BRL/USDT para converter o saldo BRL
+        usdt_brl_price = 6.0 # Fallback
+        try:
+            ticker_brl = ex(exchange.fetch_ticker, 'USDT/BRL')
+            usdt_brl_price = float(ticker_brl['last'])
+        except: pass
+        
+        if brl_free > 0:
+            total_usdt_estimated += (brl_free / usdt_brl_price)
+
+        # 2. Itera sobre OUTRAS moedas para somar valor
+        tokens_msg = ""
+        for coin, amount in balances.items():
+            amount = float(amount)
+            if amount <= 0 or coin in ['USDT', 'BRL', 'USD']: 
+                continue
+            
+            # Filtra dust
+            if amount < 0.0001: continue
+            
+            # Busca preço para estimar valor em USDT
+            price = 0.0
+            symbol = f"{coin}/USDT"
+            
+            # Tenta cache do market overview
+            market_ov = snap.get('market_overview', {})
+            if symbol in market_ov:
+                price = float(market_ov[symbol].get('price', 0))
+            
+            # Se não achou, tenta entry_price das posições abertas
+            if price == 0:
+                strategies = snap.get('strategies', {})
+                for s in strategies.values():
+                    pos = s.get('positions', {}).get(symbol) or s.get('position')
+                    if pos and pos.get('symbol') == symbol:
+                        price = float(pos.get('current_price') or pos.get('entry_price') or 0)
+                        break
+            
+            # Se ainda zero, tenta fetch rápido (se exchange ok)
+            if price == 0 and exchange:
+                try:
+                    t = ex(exchange.fetch_ticker, symbol)
+                    price = float(t['last'])
+                except: pass
+
+            val_usdt = amount * price
+            total_usdt_estimated += val_usdt
+            tokens_msg += f"• *{coin}:* {amount:.4f} (~${val_usdt:.2f})\n"
+
+        # 3. Monta Mensagem
+        total_brl_estimated = total_usdt_estimated * usdt_brl_price
+        
+        msg += f"💵 *Total Geral:* ${total_usdt_estimated:.2f} (~R${total_brl_estimated:.2f})\n"
+        msg += "------------------------------\n"
+        msg += f"🟢 *Livre:* ${usdt_free:.2f} | R${brl_free:.2f}\n\n"
+        
+        if tokens_msg:
+            msg += "🪙 *Em Carteira (Moedas):*\n" + tokens_msg
         else:
-            usdt = balances.get('USDT', 0.0)
-            brl = balances.get('BRL', 0.0)
-            
-            msg += f"💵 *USDT:* ${usdt:.2f}\n"
-            msg += f"🇧🇷 *BRL:* R${brl:.2f}\n\n"
-            
-            msg += "🪙 *Outras Moedas:*\n"
-            for coin, amount in balances.items():
-                if coin not in ['USDT', 'BRL'] and float(amount) > 0:
-                    # Filtra dust
-                    if float(amount) > 0.0001: 
-                        msg += f"• *{coin}:* {amount:.4f}\n"
-            
-            # Total em BRL
-            total_brl = float((snap.get('user_info', {}) or {}).get('total_brl', 0) or 0)
-            if total_brl > 0:
-                msg += f"\n📊 *Total em BRL:* R${total_brl:.2f}"
+            msg += "🪙 *Carteira vazia (só caixa)*"
         
         await update.message.reply_text(msg, parse_mode='Markdown')
     except Exception as e:
-        await update.message.reply_text(f"❌ Erro ao buscar saldo: {str(e)}")
+        await update.message.reply_text(f"❌ Erro ao calcular saldo: {str(e)}")
 
 async def telegram_position(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Mostra posição aberta atual."""

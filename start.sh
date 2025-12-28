@@ -4,5 +4,5 @@ cd /home/ubuntu/projetobinace
 pkill -f server.py
 sleep 2
 # Start fresh
-nohup /home/ubuntu/projetobinace/venv/bin/python3 /home/ubuntu/projetobinace/server.py > output.log 2>&1 &
+nohup /home/ubuntu/projetobinace/venv/bin/python3 /home/ubuntu/projetobinace/server.py > logs/output.log 2>&1 &
 echo $! > server.pid

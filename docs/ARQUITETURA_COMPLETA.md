@@ -1,7 +1,7 @@
 # 📚 ARQUITETURA COMPLETA DO SISTEMA DE TRADING - SANDRA AI
 
 > **Documentação Técnica Completa e Detalhada**  
-> Versão: 2.0 | Última atualização: 25/12/2025
+> Versão: 3.1 (Sandra Mode: Majors First) | Última atualização: 28/12/2025
 
 ---
 
@@ -207,7 +207,31 @@ def check_strategy_signal():
 
 ---
 
+## 🚀 SANDRA 3.1: FILOSOFIA "MAJORS FIRST"
+
+A partir da versão 3.1, o sistema implementa uma **segregação rigorosa de ativos**, priorizando segurança e liquidez.
+
+### 🏆 Sistema de Tiers (Níveis)
+
+1. **TIER A (A Realeza)**
+   - **Ativos:** BTC, ETH, SOL, BNB
+   - **Privilégios:**
+     - Critérios de entrada mais leves
+     - Compra permitida mesmo com BTC em correção leve
+     - Spread e slippage estimados mais baixos
+
+2. **TIER B (O Resto)**
+   - **Ativos:** Todas as outras altcoins
+   - **Restrições Extremas:**
+     - **Regime BULL Obrigatório:** Só compra se BTC estiver em tendência de alta clara (EMA50 > EMA200 no 1h)
+     - **RSI de Fundo:** Exige RSI(5m) ≤ 24 e RSI(15m) ≤ 32
+     - **Sniper Entry:** Preço deve estar colado na Banda de Bollinger Inferior (< 1% de distância)
+     - **Edge Líquido:** Exige lucro projetado > 1.2% já descontando taxas/spread
+
+---
+
 ## 🎯 SCALPER BLINDADO: CÉREBRO DE ANÁLISE TÉCNICA
+
 
 O `scalper_blindado.py` é o módulo responsável pela **análise técnica avançada** que decide quando comprar.
 

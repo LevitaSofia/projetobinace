@@ -24,32 +24,35 @@ def is_tier_a(symbol):
 
 def calculate_rsi_multitimeframe(exchange, symbol):
     """
-    Calcula RSI em múltiplos timeframes (5m e 15m).
+    Calcula RSI em múltiplos timeframes (1h e 4h).
     
     Returns:
-        dict: {'rsi_5m': float, 'rsi_15m': float, 'success': bool}
+        dict: {'rsi_1h': float, 'rsi_4h': float, 'rsi_5m': float, 'rsi_15m': float, 'success': bool}
     """
     try:
-        # RSI 5m
-        klines_5m = exchange.fetch_ohlcv(symbol, '5m', limit=50)
-        if not klines_5m or len(klines_5m) < 14:
-            return {'success': False, 'error': 'Dados 5m insuficientes'}
+        # RSI 1h (timeframe principal)
+        klines_1h = exchange.fetch_ohlcv(symbol, '1h', limit=50)
+        if not klines_1h or len(klines_1h) < 14:
+            return {'success': False, 'error': 'Dados 1h insuficientes'}
         
-        df_5m = pd.DataFrame(klines_5m, columns=['time', 'open', 'high', 'low', 'close', 'volume'])
-        rsi_5m = float(ta.rsi(df_5m['close'], length=14).iloc[-1])
+        df_1h = pd.DataFrame(klines_1h, columns=['time', 'open', 'high', 'low', 'close', 'volume'])
+        rsi_1h = float(ta.rsi(df_1h['close'], length=14).iloc[-1])
         
-        # RSI 15m
-        klines_15m = exchange.fetch_ohlcv(symbol, '15m', limit=50)
-        if not klines_15m or len(klines_15m) < 14:
-            return {'success': False, 'error': 'Dados 15m insuficientes'}
+        # RSI 4h (confirmação maior)
+        klines_4h = exchange.fetch_ohlcv(symbol, '4h', limit=50)
+        if not klines_4h or len(klines_4h) < 14:
+            return {'success': False, 'error': 'Dados 4h insuficientes'}
         
-        df_15m = pd.DataFrame(klines_15m, columns=['time', 'open', 'high', 'low', 'close', 'volume'])
-        rsi_15m = float(ta.rsi(df_15m['close'], length=14).iloc[-1])
+        df_4h = pd.DataFrame(klines_4h, columns=['time', 'open', 'high', 'low', 'close', 'volume'])
+        rsi_4h = float(ta.rsi(df_4h['close'], length=14).iloc[-1])
         
+        # Mantém 5m e 15m para compatibilidade (valores iguais a 1h)
         return {
             'success': True,
-            'rsi_5m': rsi_5m,
-            'rsi_15m': rsi_15m
+            'rsi_1h': rsi_1h,
+            'rsi_4h': rsi_4h,
+            'rsi_5m': rsi_1h,  # Compatibilidade
+            'rsi_15m': rsi_4h  # Compatibilidade
         }
     
     except Exception as e:
