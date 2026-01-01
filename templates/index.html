@@ -355,6 +355,40 @@
             </div>
 
         </div> <!-- End Row -->
+
+        <!-- Nova Linha: Histórico de Transações -->
+        <div class="row g-4 mt-2">
+            <div class="col-12">
+                <div class="card">
+                    <div class="card-header"><i class="bi bi-clock-history"></i> EXTRATO DETALHADO (HISTÓRICO)</div>
+                    <div class="card-body p-0 table-responsive" style="max-height: 400px; overflow-y: auto;">
+                        <table class="table table-cyber table-sm mb-0">
+                            <thead>
+                                <tr>
+                                    <th>Data/Hora</th>
+                                    <th>Par</th>
+                                    <th>Operação</th>
+                                    <th>Preço</th>
+                                    <th>Qtd</th>
+                                    <th>Investido ($)</th>
+                                    <th>Resultado ($)</th>
+                                    <th>Resultado (%)</th>
+                                    <th>Estratégia</th>
+                                </tr>
+                            </thead>
+                            <tbody id="history-body">
+                                <tr>
+                                    <td colspan="9" class="text-center text-muted">Carregando...</td>
+                                </tr>
+                            </tbody>
+                            <tfoot id="history-footer">
+                                <!-- Preenchido via JS -->
+                            </tfoot>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
     </div>
 
     <!-- Scripts -->
@@ -604,6 +638,90 @@
             } catch (e) { console.error("Erro logs:", e); }
         }
 
+        async function fetchHistory() {
+            try {
+                const res = await fetch('/api/history');
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                const data = await res.json();
+                const tbody = document.getElementById('history-body');
+
+                if (!data.history || data.history.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="8" class="text-center text-muted py-3">Sem histórico registrado</td></tr>';
+                    return;
+                }
+
+                let html = '';
+                data.history.forEach(t => {
+                    const isSell = t.side.toLowerCase() === 'sell';
+                    const sideBadge = isSell
+                        ? '<span class="badge bg-danger">VENDA</span>'
+                        : '<span class="badge bg-success">COMPRA</span>';
+
+                    let resultClass = 'text-muted';
+                    let resultIcon = '';
+                    if (isSell) {
+                        if (t.profit > 0) { resultClass = 'text-success fw-bold'; resultIcon = '📈'; }
+                        else if (t.profit < 0) { resultClass = 'text-danger fw-bold'; resultIcon = '📉'; }
+                    }
+
+                    const profitDisplay = isSell ? `$${t.profit.toFixed(2)}` : '-';
+                    const pctDisplay = isSell ? `${t.profit_pct.toFixed(2)}%` : '-';
+
+                    let investedDisplay = '-';
+                    let investedVal = 0.0;
+
+                    // Lógica para calcular Investido vs Retornado
+                    if (isSell) {
+                        // Tentar pegar do json_data se disponível (precisa parsear no backend ou aqui)
+                        // Mas o backend manda json_data como string ou dict? 
+                        // No python: cursor.execute -> json_data string. Precisa parsear.
+
+                        // Fallback simples: Investido = (ExitPrice * Qty) - Profit
+                        const totalExit = t.price * t.qty;
+                        investedVal = totalExit - t.profit; // Profit é net_profit_usdt
+                        investedDisplay = `$${investedVal.toFixed(2)}`;
+                    } else {
+                        // BUY: Investido = Price * Qty
+                        investedVal = t.price * t.qty;
+                        investedDisplay = `$${investedVal.toFixed(2)}`;
+                    }
+
+                    html += `
+                        <tr>
+                            <td>${t.time}</td>
+                            <td class="fw-bold">${t.symbol}</td>
+                            <td>${sideBadge}</td>
+                            <td>$${t.price.toFixed(4)}</td>
+                            <td>${t.qty.toFixed(4)}</td>
+                            <td class="text-muted fw-bold">${investedDisplay}</td>
+                            <td class="${resultClass}">${resultIcon} ${profitDisplay}</td>
+                            <td class="${resultClass}">${pctDisplay}</td>
+                            <td class="text-muted small">${t.strategy}</td>
+                        </tr>
+                    `;
+                });
+                tbody.innerHTML = html;
+
+                // Atualiza o rodapé com TOTAL GERAL
+                const totalPnl = parseFloat(data.total_pnl || 0);
+                const colorTotal = totalPnl >= 0 ? 'text-success' : 'text-danger';
+                const footer = document.getElementById('history-footer');
+                if (footer) {
+                    footer.innerHTML = `
+                        <tr class="fw-bold border-top border-secondary bg-dark">
+                            <td colspan="7" class="text-end text-light">TOTAL ACUMULADO ATÉ HOJE:</td>
+                            <td class="${colorTotal} fs-5">${totalPnl >= 0 ? '+' : ''}$${totalPnl.toFixed(2)}</td>
+                            <td></td>
+                        </tr>
+                    `;
+                }
+
+            } catch (e) {
+                console.error("Erro history:", e);
+                document.getElementById('history-body').innerHTML = '<tr><td colspan="8" class="text-center text-danger">Erro ao carregar histórico</td></tr>';
+            }
+        }
+
         async function loadChartData(symbol) {
             try {
                 // Simulação ou endpoint real de candles
@@ -628,7 +746,9 @@
                     fetchStatus(),
                     fetchWatchlist(),
                     fetchPositions(),
+                    fetchPositions(),
                     fetchLogs(),
+                    fetchHistory(),
                 ]);
             } finally {
                 refreshInFlight = false;
@@ -639,7 +759,9 @@
         fetchStatus();
         fetchWatchlist();
         fetchPositions();
+        fetchPositions();
         fetchLogs();
+        fetchHistory();
 
         // Listener do Select de Gráfico
         document.getElementById('chart-symbol-select').addEventListener('change', (e) => {

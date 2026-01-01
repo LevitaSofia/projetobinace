@@ -222,3 +222,27 @@ def calculate_dynamic_strategy(sentiment, fng_value):
         config["MODE"] = "DEFENSIVO"
 
     return config
+
+
+def estimate_trade_duration(tp_pct, atr_pct, timeframe_mins=15):
+    """
+    🔮 Estima quanto tempo (em minutos) a operação vai levar.
+    Baseado na volatilidade atual (ATR) vs Alvo (TP).
+    """
+    try:
+        if atr_pct <= 0: return 240 # Default 4h
+        
+        # Quantas 'unidades de volatilidade' precisamos andar?
+        # Fator 0.6 considera que o preço não vai em linha reta (ziguezague)
+        needed_movement = tp_pct
+        candles_needed = needed_movement / (atr_pct * 0.6)
+        
+        minutes = int(candles_needed * timeframe_mins)
+        
+        # Limites sensatos
+        if minutes < 15: minutes = 15
+        if minutes > 2880: minutes = 2880 # Max 48h
+        
+        return minutes
+    except:
+        return 240 # 4h default

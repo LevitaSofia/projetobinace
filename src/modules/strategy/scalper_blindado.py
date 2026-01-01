@@ -8,7 +8,19 @@ Regras:
 
 import pandas as pd
 import pandas_ta as ta
+import os
+import sys
 
+# sys.path hack removido após reorganização
+
+
+try:
+    from src.modules.intelligence.fibonacci_analyzer import calculate_fib_levels
+    from src.modules.intelligence.ml_predictor import predictor as ml_brain
+except ImportError:
+    # Fallback silencioso se o arquivo não existir ainda
+    def calculate_fib_levels(x, **k): return {'success': False}
+    ml_brain = None
 
 MOEDAS_FORTES = {'BTC', 'ETH', 'BNB', 'SOL'}
 
@@ -47,9 +59,21 @@ def analisar_sinal_hibrido(candles_raw, symbol_name="UNKNOWN"):
 
         eh_forte = base in MOEDAS_FORTES
 
+        # 🎯 CONFIGURAÇÃO ELITE PERSONALIZADA (INDIVIDUAL)
+        # Ajuste fino baseado no histórico de performance
+        RSI_THRESHOLDS = {
+            'ETH': 37,  # Campeã (87%): Mais flexível
+            'SOL': 37,  # Invicta (100%): Mais flexível
+            'BTC': 35,  # Referência: Padrão
+            'XRP': 32,  # Nova: Conservador
+        }
+        
+        # Pega limite específico ou usa padrão
+        rsi_limite_base = RSI_THRESHOLDS.get(base, 28 if not eh_forte else 35)
+
         if eh_forte:
             config = {
-                'RSI_GATILHO': 35,
+                'RSI_GATILHO': rsi_limite_base,
                 'ADX_MAXIMO': 60,
                 'TIPO': '👑 ELITE (Forte)',
             }
@@ -117,6 +141,38 @@ def analisar_sinal_hibrido(candles_raw, symbol_name="UNKNOWN"):
         except Exception:
             bb_lower, bb_upper = float('nan'), float('nan')
 
+        # --- PREPARA COLUNAS PARA ML (Vectorized) ---
+        # Renomeia para lowercase para compatibilidade
+        if 'RSI' in df.columns: df['rsi'] = df['RSI']
+        if 'ADX' in df.columns: df['adx'] = df['ADX']
+        if 'ATR' in df.columns: 
+            df['atr_pct'] = (df['ATR'] / df['close']) * 100
+        else:
+            df['atr_pct'] = 0.0
+        
+        # Volume Ratio (Rolling Mean 20)
+        df['vol_avg'] = df['volume'].rolling(window=20).mean()
+        df['vol_ratio'] = df['volume'] / df['vol_avg']
+
+        # Bandas para ML (precisamos adicionar ao DF para training)
+        if bb is not None and not bb.empty:
+            # Tenta achar colunas
+            lower_cols = [c for c in bb.columns if str(c).startswith('BBL_')]
+            if lower_cols:
+                df['bb_lower'] = bb[lower_cols[0]]
+                # Distância da banda (feature importante)
+                df['dist_from_bb_lower'] = (df['close'] - df['bb_lower']) / df['close']
+            else:
+                 df['bb_lower'] = 0.0
+                 df['dist_from_bb_lower'] = 0.0
+        else:
+             df['bb_lower'] = 0.0
+             df['dist_from_bb_lower'] = 0.0
+        
+        # Preenche NaNs gerados pelo rolling (início do DF)
+        df.fillna(0, inplace=True)
+
+
         # 🧠 INTELIGÊNCIA: Calcula volume ratio (para aposta dinâmica)
         vol_now = float(atual['volume']) if not pd.isna(atual['volume']) else 0.0
         vol_avg = float(df['volume'].tail(20).mean()) if len(df) >= 20 else vol_now
@@ -153,12 +209,58 @@ def analisar_sinal_hibrido(candles_raw, symbol_name="UNKNOWN"):
             'ema200': ema200,  # 🆕 EMA 200
             'tendencia_alta': tendencia_alta,  # 🆕 Mercado em alta?
         }
+        
+        # 🧠 INTELIGÊNCIA FIBONACCI (NOVO)
+        # Calcula níveis de retração estrutural
+        fib_data = calculate_fib_levels(candles_raw, lookback=100)
+        dados['fibonacci'] = fib_data
+        
+        # Adiciona flag de confluência
+        fib_score = fib_data.get('confluence_score', 0)
+        dados['fib_confluence'] = fib_score >= 80 # Só considera confluência se tocar em 0.618 ou 0.5
+
+        # 🤖 MACHINE LEARNING (SUPER CÉREBRO)
+        ml_prob = 50.0
+        if ml_brain:
+            # Treina se necessário (primeira vez)
+            if not ml_brain.is_trained:
+                print("🧠 Treinando Cérebro ML em background...")
+                # Cria DataFrame completo para treino
+                ml_brain.train_model(df)
+            
+            # Prepara indicadores atuais para previsão
+            indicators_ml = {
+                'rsi': rsi,
+                'adx': adx,
+                'atr_pct': atr_pct,
+                'vol_ratio': vol_ratio,
+                'dist_from_bb_lower': (price - bb_lower) / price if bb_lower and price else 0.0
+            }
+            ml_prob = ml_brain.predict_score(indicators_ml)
+            
+        dados['ml_prob'] = ml_prob
+
 
         if pd.isna(price) or pd.isna(rsi):
             return False, "Indicadores calculados como NaN", dados
 
-        if rsi >= config['RSI_GATILHO']:
-            return False, f"RSI {rsi:.1f} >= {config['RSI_GATILHO']} (Regra {config['TIPO']})", dados
+        if pd.isna(price) or pd.isna(rsi):
+            return False, "Indicadores calculados como NaN", dados
+
+        # REGRA MESTRA:
+        # 1. Se tiver Confluência FIBO (Preço no 0.618), aceita RSI até 35 (mais flexível)
+        # 2. Se não tiver Fibo, segue regra rígida (RSI < 28 ou 35 dependendo da moeda)
+        
+        rsi_limite = config['RSI_GATILHO']
+        tem_fibo = dados.get('fib_confluence', False)
+        
+        if tem_fibo:
+            rsi_limite += 5 # Dá um bônus de 5 pontos no RSI se tiver suporte matemático
+            
+        if rsi >= rsi_limite:
+            if tem_fibo:
+                return False, f"RSI {rsi:.1f} alto mesmo c/ Fibo (Limite {rsi_limite})", dados
+            return False, f"RSI {rsi:.1f} >= {rsi_limite} (Sem Fibo)", dados
 
         if adx > config['ADX_MAXIMO']:
             return False, f"Tendência Extrema (ADX {adx:.1f} > {config['ADX_MAXIMO']})", dados
@@ -168,7 +270,21 @@ def analisar_sinal_hibrido(candles_raw, symbol_name="UNKNOWN"):
         if not eh_forte and not tendencia_alta:
             return False, f"⚠️ TENDÊNCIA DE BAIXA (EMA50 < EMA200) - Aguardando reversão", dados
 
-        return True, f"ENTRADA {config['TIPO']} APROVADA", dados
+        # 🛡️ FILTRO 4: MACHINE LEARNING CHECK
+        # Se ML disser que é furada (Prob < 40%), bloqueia mesmo com RSI bonito
+        if ml_prob < 40.0:
+            return False, f"⛔ ML REJEITOU: Probabilidade Baixa ({ml_prob:.1f}%)", dados
+
+        msg_aprovacao = f"ENTRADA {config['TIPO']} APROVADA"
+        if tem_fibo:
+             msg_aprovacao += " 🎯 (SNIPER FIBO 0.618)"
+        
+        if ml_prob > 80.0:
+            msg_aprovacao += f" 💎 (ML DIAMOND {ml_prob:.0f}%)"
+        else:
+            msg_aprovacao += f" 🤖 (ML Score: {ml_prob:.0f}%)"
+            
+        return True, msg_aprovacao, dados
 
     except Exception as e:
         print(f"Erro Scalper: {e}")

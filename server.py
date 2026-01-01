@@ -30,8 +30,11 @@ Objetivo: Fazer o patrimônio crescer com segurança e manter o chefe informado 
 import os
 import json
 import time
+import tempfile  # 🎙️ Para processamento de áudio
 import random
 import re
+import sys
+import signal # Para matar processos antigos
 import threading
 import copy
 import queue
@@ -52,10 +55,25 @@ import pandas as pd
 from openai import OpenAI
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
-import scalper_blindado
-import ceo_manager
-import trade_reporter  # 🚨 Relatórios completos
-import sandra_filters  # 🏆 Sandra 3.1: Majors First
+
+# Importações de Módulos (Refatorado)
+from src.modules.strategy import scalper_blindado
+from src.modules.intelligence import ceo_manager
+from src.modules.intelligence.forecaster import MarketForecaster
+from src.modules.reporting import trade_reporter  # 🚨 Relatórios completos
+from src.modules.strategy import sandra_filters  # 🏆 Sandra 3.1: Majors First
+
+# Inicialização de Módulos Globais
+# risk_manager = RiskManager()
+# cost_calculator = CostCalculator()
+# bnb_manager = BNBTreasuryManager()
+# ceo_manager é um módulo, não classe
+market_forecaster = MarketForecaster()
+
+try:
+    from src.modules.reporting import excel_reporter # 📊 Gera .xlsx automaticamente
+except ImportError:
+    excel_reporter = None
 
 import logging
 import traceback
@@ -63,7 +81,7 @@ from logging.handlers import RotatingFileHandler
 
 # Relatórios por e-mail (std lib) + leitura do SQLite
 try:
-    from reporting import build_daily_summary, format_daily_summary_text, send_email_smtp
+    from src.modules.reporting.email_reporting import build_daily_summary, format_daily_summary_text, send_email_smtp
 except Exception:
     build_daily_summary = None
     format_daily_summary_text = None
@@ -71,7 +89,7 @@ except Exception:
 
 # Backup/rotação do SQLite (snapshot consistente)
 try:
-    from db_backup import backup_sqlite_db, env_truthy as _env_truthy_db
+    from src.modules.utils.db_backup import backup_sqlite_db, env_truthy as _env_truthy_db
 except Exception:
     backup_sqlite_db = None
     _env_truthy_db = None
@@ -97,6 +115,53 @@ _rot_handler = RotatingFileHandler(
 _rot_handler.setLevel(logging.INFO)
 _rot_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
 _root_logger.addHandler(_rot_handler)
+
+# ------------------------------------------------------------------------------
+# 🔒 SINGLETON LOCK: Garante apenas UMA instância rodando
+# ------------------------------------------------------------------------------
+PID_FILE = 'server.pid'
+
+def ensure_single_instance():
+    """Mata instância antiga se existir e cria novo lock."""
+    # 1. Verifica se já existe um PID salvo
+    if os.path.exists(PID_FILE):
+        try:
+            with open(PID_FILE, 'r') as f:
+                content = f.read().strip()
+                if content.isdigit():
+                    old_pid = int(content)
+                    
+                    # Se for o mesmo processo, ignora
+                    if old_pid == os.getpid():
+                        return
+
+                    # Tenta matar o processo antigo
+                    print(f"♻️ Detectada instância antiga (PID {old_pid}). Encerrando...")
+                    try:
+                        os.kill(old_pid, signal.SIGTERM)
+                        # Dá um tempo para morrer
+                        for _ in range(5):
+                            time.sleep(0.5)
+                            os.kill(old_pid, 0) # Verifica se ainda existe
+                    except OSError:
+                        # Processo já morreu ou não temos permissão (mas somos o mesmo user)
+                        print("✅ Instância antiga já estava encerrada.")
+                    except Exception as e:
+                        print(f"⚠️ Erro ao matar PID {old_pid}: {e}")
+        except Exception as e:
+            print(f"⚠️ Erro ao ler server.pid: {e}")
+
+    # 2. Escreve novo PID
+    try:
+        with open(PID_FILE, 'w') as f:
+            f.write(str(os.getpid()))
+        print(f"🔒 Novo Lock criado: PID {os.getpid()}")
+    except Exception as e:
+        print(f"❌ Erro ao escrever server.pid: {e}")
+
+# Executa o Lock imediatamente
+ensure_single_instance()
+# ------------------------------------------------------------------------------
 
 # Carrega variáveis de ambiente
 load_dotenv()
@@ -254,9 +319,27 @@ SYMBOL = os.getenv('SYMBOL', 'BTC/USDT')
 AMOUNT_INVEST = float(os.getenv('AMOUNT_INVEST', 11.0))
 FEE_RATE = 0.001  # 0.1%
 
-# 💰 JURO COMPOSTO: Saldo base para escalar apostas automaticamente
-# À medida que o saldo cresce, as apostas aumentam proporcionalmente
-SALDO_BASE = float(os.getenv('SALDO_BASE', 100.0))  # Saldo inicial da conta
+# 💎 OVERRIDES: Apostas Personalizadas por Moeda
+SYMBOL_INVEST_OVERRIDES = {
+    'ETH/USDT': 20.0,  # Aposta Aumentada (Alta Confiabilidade)
+    'SOL/USDT': 20.0,  # Aposta Aumentada (Alta Confiabilidade)
+    'BTC/USDT': 15.0,
+}
+
+# 📋 WATCHLIST OTIMIZADA (ELITE ONLY)
+# Removidos: ADA, LTC, BNB (Performance ruim/risco alto)
+WATCHLIST = [
+    'ETH/USDT', 'SOL/USDT', 'BTC/USDT', 'XRP/USDT'
+]
+
+# 💰 CONFIGURAÇÃO DE JUROS COMPOSTOS (BOLA DE NEVE)
+# Se COMPOUND_ON=True, a aposta aumenta quando Saldo > SALDO_BASE
+# Aposta = ApostaBase * (SaldoAtual / SALDO_BASE)
+COMPOUND_ON = True
+SALDO_BASE = float(os.getenv('SALDO_BASE', 72.0)) # Ajustado para o capital atual do usuário
+SNIPER_MULTIPLIER = 2.0  # Boost de 100% (DOBRO) para trades com Fibonacci - MAXIMIZAR GANHOS
+MAX_DAILY_LOSS = -3.0 # Circuit Breaker: Para tudo se perder 3% do capital no dia
+
 
 # Configuração GPT (controle de uso)
 OPENAI_MODEL = os.getenv('OPENAI_MODEL', 'gpt-4.1-mini')
@@ -2086,7 +2169,9 @@ def check_exit_signal(position, current_price, rsi, bb_upper=None, strategy_name
         LUCRO_MINIMO_TAXAS = 0.6
 
     # Se RSI estiver MUITO alto, vende de qualquer jeito (proteção)
-    if rsi is not None and rsi >= 78:
+    # Se for posição recuperada (órfã), somos mais agressivos na saída (70)
+    rsi_crash = 70 if position.get('orphan_recovered') else 78
+    if rsi is not None and rsi >= rsi_crash:
         return True, f"RSI Extremo ({rsi:.1f}) - Proteção de Crash"
 
     # RSI alto padrão: só vende se já tiver lucro suficiente
@@ -2320,7 +2405,8 @@ def send_chart_to_telegram(symbol, caption=""):
 
 def _gerar_justificativa_compra(symbol, rsi, buy_price, buy_qty, buy_total, taxa_est, 
                                  sl_usado, tp_usado, preco_sl, preco_tp, pos_info, reason=None,
-                                 rsi_15m=None, edge_liquido=None, regime_btc=None, tier=None):
+                                 rsi_15m=None, edge_liquido=None, regime_btc=None, tier=None,
+                                 fib_confluence=False, fib_level=None, ml_prob=None):
     """
     🧠 JUSTIFICATIVA INTELIGENTE: Documenta por que a IA decidiu comprar.
     
@@ -2332,173 +2418,62 @@ def _gerar_justificativa_compra(symbol, rsi, buy_price, buy_qty, buy_total, taxa
     - Risco/Recompensa calculado
     """
     try:
-        # Identifica a classificação da moeda
-        coin = symbol.split('/')[0].upper()
-        from scalper_blindado import MOEDAS_FORTES
-        tier = "👑 ELITE (Forte)" if coin in MOEDAS_FORTES else "🎰 ALTCOIN (Arriscada)"
+        # Emojis e Identidade Visual Elite
+        emoji_map = {
+            'ETH/USDT': '💎',
+            'SOL/USDT': '☀️',
+            'BTC/USDT': '👑',
+            'XRP/USDT': '💧'
+        }
+        emoji = emoji_map.get(symbol, '🎯')
         
-        # 🚨 ALERTA ESPECIAL: Major com RSI extremo
-        TIER_A_SYMBOLS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BNB/USDT']
-        is_major = symbol in TIER_A_SYMBOLS
-        alerta_major = ""
-        
-        if is_major and rsi < 20:
-            alerta_major = f"""
-🚨🚨🚨 *OPORTUNIDADE EXTREMA* 🚨🚨🚨
-
-*{coin} COM RSI {rsi:.1f}!!!*
-
-Este é um RSI EXTREMAMENTE BAIXO em uma MAJOR!
-Historicamente, RSI < 20 em BTC/ETH gera reversões fortes.
-PRIORIDADE ABSOLUTA sobre qualquer altcoin.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-"""
-        elif is_major and rsi < 25:
-            alerta_major = f"""
-🔥 *OPORTUNIDADE FORTE* 🔥
-
-*{coin} com RSI {rsi:.1f}*
-
-Major em sobrevenda forte!
-Prioridade sobre altcoins.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-"""
-        
-        # Busca dados técnicos do market_overview
-        market_data = lab_state.get('market_overview', {}).get(symbol, {})
-        adx = market_data.get('adx', 0.0)
-        atr = market_data.get('atr', 0.0)
-        bb_lower = market_data.get('bb_lower', 0.0)
-        vol_ratio = None
-        
-        # Calcula volume ratio se disponível
-        try:
-            last_decision = lab_state.get('last_decisions', {}).get(symbol, {})
-            scalper_reason = last_decision.get('scalper_reason', 'Análise técnica favorável')
-        except Exception as e_decision:
-            logger.debug(f"Erro ao obter last_decision para {symbol}: {e_decision}")
-            scalper_reason = reason or 'Análise técnica favorável'
-        
-        # Busca sentimento de mercado
-        try:
-            sentiment, fng_value = ceo_manager.get_market_sentiment()
-            sentimento_emoji = "😨" if sentiment == "BEAR" else "😐" if sentiment == "NEUTRO" else "😁"
-            sentimento_texto = f"{sentimento_emoji} {sentiment} (F&G: {fng_value})"
-        except Exception as e_sentiment:
-            logger.debug(f"Erro ao obter sentimento de mercado: {e_sentiment}")
-            sentimento_texto = "😐 NEUTRO (dados indisponíveis)"
-        
-        # Análise de tendência baseada em ADX
-        if adx > 40:
-            tendencia = "📈 Tendência FORTE (ADX > 40) - Movimento sustentável"
-        elif adx > 25:
-            tendencia = "📊 Tendência MODERADA (ADX 25-40) - Confirmação presente"
-        elif adx > 15:
-            tendencia = "〰️ Tendência FRACA (ADX 15-25) - Mercado lateral"
+        # Define o rótulo do tamanho da aposta
+        if buy_total >= 30.0:
+            calibre = "SNIPER BOOST (2X)"
+        elif buy_total >= 18.0:
+            calibre = "CALIBRE GROSSO"
         else:
-            tendencia = "🔄 SEM TENDÊNCIA (ADX < 15) - Reversão à média esperada"
-        
-        # Análise de volatilidade
-        if atr > 0:
-            atr_pct = (atr / buy_price * 100)
-            if atr_pct > 3.0:
-                volatilidade = f"⚡ ALTA ({atr_pct:.2f}%) - Stop Loss ajustado"
-            elif atr_pct > 1.5:
-                volatilidade = f"📊 MODERADA ({atr_pct:.2f}%) - Configuração ideal"
-            else:
-                volatilidade = f"🔒 BAIXA ({atr_pct:.2f}%) - Stop Loss apertado"
+            calibre = "PADRÃO"
+
+        # Título Dinâmico
+        if fib_confluence:
+            titulo = f"☀️ MODO ELITE - SNIPER BOOST"
         else:
-            volatilidade = "📊 Dados insuficientes"
+            titulo = f"🦅 MODO ELITE - ENTRADA"
+
+        # Monta mensagem
+        msg = f"{titulo}\n\n"
+        msg += f"{emoji} **{symbol}**\n"
+        msg += f"💰 **${buy_total:.2f} ({calibre})**\n"
+        msg += f"📊 RSI: {rsi:.1f} (Gatilho: <37/35)\n"
         
-        # Fonte dos dados
-        fonte_dados = "📡 *FONTES DOS DADOS:*\n"
-        fonte_dados += "• Preço/Volume: Binance API (tempo real)\n"
-        fonte_dados += "• Indicadores: Scalper Blindado (RSI, BB, ADX, ATR)\n"
-        fonte_dados += "• Sentimento: CEO Manager (Fear & Greed Index)\n"
-        if pos_info.get('sl_dinamico'):
-            fonte_dados += "• SL/TP: IA Dinâmica (ATR + ADX + Sentimento)\n"
+        if fib_confluence:
+            msg += f"🎯 Fibonacci {fib_level}: Suporte Confirmado\n"
         else:
-            fonte_dados += "• SL/TP: Valores fixos (Sandra Mode)\n"
+            msg += f"📉 Sobrevenda Extrema (Oportunidade)\n"
+            
+        msg += f"\n💵 Preço: ${buy_price:.4f}\n"
+        msg += f"⏰ {datetime.now().strftime('%H:%M:%S')} UTC\n\n"
         
-        # Confluência de sinais
-        confluencia = "🎯 *CONFLUÊNCIA DE SINAIS:*\n"
-        pontos = 0
+        # Pontuação de Confiança
+        score = 3
+        if rsi < 30: score += 1
+        if fib_confluence: score += 2
+        confianca = "MÁXIMA 🚀" if score >= 5 else "ALTA 🔥"
         
-        if rsi < 20:
-            confluencia += f"✅ RSI {rsi:.1f} < 20 (EXTREMO) +3pts\n"
-            pontos += 3
-        elif rsi < 25:
-            confluencia += f"✅ RSI {rsi:.1f} < 25 (FORTE) +2pts\n"
-            pontos += 2
-        elif rsi < 30:
-            confluencia += f"✅ RSI {rsi:.1f} < 30 (PADRÃO) +1pt\n"
-            pontos += 1
-        else:
-            confluencia += f"⚠️ RSI {rsi:.1f} (sem bônus)\n"
+        msg += f"Confiança: {confianca} (Score: {score}/6)\n"
         
-        if bb_lower > 0 and buy_price <= bb_lower * 1.02:
-            confluencia += f"✅ Preço na Banda Inferior (sobrevenda) +1pt\n"
-            pontos += 1
-        
-        if sentiment == "BEAR":
-            confluencia += f"✅ Mercado em PÂNICO (compra contra-tendência) +2pts\n"
-            pontos += 2
-        elif sentiment == "NEUTRO":
-            confluencia += f"• Sentimento neutro +1pt\n"
-            pontos += 1
-        
-        confluencia += f"\n📊 *Total: {pontos} pontos* "
-        if pontos >= 6:
-            confluencia += "→ OPORTUNIDADE MÁXIMA 💎"
-        elif pontos >= 4:
-            confluencia += "→ SINAL FORTE 🔥"
-        elif pontos >= 2:
-            confluencia += "→ SINAL PADRÃO 🚀"
-        else:
-            confluencia += "→ Sinal fraco"
-        
-        # Monta mensagem completa
-        msg = f"{alerta_major}"  # Alerta especial se for major com RSI baixo
-        msg += f"🚨 *DECISÃO DA IA: NOVA POSIÇÃO* 🚨\n\n"
-        msg += f"🪙 *Ativo:* {symbol} ({tier})\n"
-        msg += f"✅ *Ação:* COMPRA\n"
-        msg += f"💵 *Preço:* ${buy_price:.4f}\n"
-        msg += f"📦 *Quantidade:* {buy_qty:.4f}\n"
-        msg += f"💰 *Investido:* ${buy_total:.2f}\n"
-        msg += f"💸 *Taxa:* -${taxa_est:.3f}\n\n"
-        
-        msg += f"🧠 *JUSTIFICATIVA TÉCNICA:*\n"
-        msg += f"📉 RSI 5m: {rsi:.1f} (sobrevendido)\n"
-        if rsi_15m:
-            msg += f"📉 RSI 15m: {rsi_15m:.1f} (confirmação)\n"
-        msg += f"{tendencia}\n"
-        msg += f"⚡ Volatilidade: {volatilidade}\n"
-        msg += f"📊 Sentimento: {sentimento_texto}\n"
-        if regime_btc:
-            regime_emoji = "🐂" if regime_btc == "BULL" else "🐻" if regime_btc == "BEAR" else "⚖️"
-            msg += f"🌊 Regime BTC: {regime_emoji} {regime_btc}\n"
-        if edge_liquido is not None:
-            edge_status = "✅" if edge_liquido >= 0.5 else "⚠️"
-            msg += f"💰 Edge líquido: {edge_status} {edge_liquido:.2f}%\n"
-        msg += f"💡 Motivo: {scalper_reason}\n\n"
-        
-        msg += confluencia + "\n\n"
-        
-        msg += f"🎯 *GESTÃO DE RISCO:*\n"
-        if pos_info.get('sl_dinamico'):
-            msg += f"🧠 Modo: IA DINÂMICA (adaptado)\n"
-        else:
-            msg += f"📌 Modo: FIXO (Sandra Mode)\n"
-        msg += f"🛑 Stop Loss: {sl_usado:.2f}% (${preco_sl:.4f})\n"
-        msg += f"✅ Take Profit: {tp_usado:.2f}% (${preco_tp:.4f})\n"
-        msg += f"📊 R:R: {abs(tp_usado/sl_usado):.2f}:1\n\n"
-        
-        msg += fonte_dados + "\n"
-        msg += f"⏰ Horário: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}"
+        # 🤖 ML Score Display
+        if ml_prob is not None and isinstance(ml_prob, (int, float)):
+             if ml_prob >= 80.0:
+                 badge = "💎 DIAMOND"
+             elif ml_prob < 40.0:
+                 badge = "⛔ RISCO"
+             else:
+                 badge = "🤖"
+             msg += f"🧠 ML Prob: {ml_prob:.0f}% {badge}\n"
+
+        msg += f"🛑 Stop: ${preco_sl:.4f} | 🎯 Alvo: ${preco_tp:.4f}"
         
         return msg
         
@@ -2514,7 +2489,58 @@ Prioridade sobre altcoins.
         )
 
 
-def execute_real_trade(action, price, symbol, reason=None, amount_usdt=None):
+def _gerar_justificativa_venda(symbol, sell_price, sell_qty, sell_gross, entry_price, entry_qty, entry_cost,
+                               lucro_liquido_usdt, lucro_liquido_pct, taxas_totais, reason,
+                               rsi_exit=None, hold_duration=None, market_sentiment=None,
+                               ml_prob=None, fib_level=None):
+    """
+    🧠 JUSTIFICATIVA DE VENDA: Explica o racional da saída.
+    """
+    try:
+        icon = "✅" if lucro_liquido_usdt > 0 else "🔻"
+        titulo = "LUCRO NO BOLSO" if lucro_liquido_usdt > 0 else "CORTE DE PREJUÍZO"
+        if "Tempo" in reason: titulo = "ENCERRAMENTO POR TEMPO"
+        if "RSI Extremo" in reason: titulo = "CRASH PROTECTION (RSI ALTO)"
+        if "Orphan" in reason: titulo = "LIMPEZA DE CARTEIRA (ÓRFÃ)"
+
+        msg = f"{icon} *{titulo}* | {symbol}\n\n"
+        
+        # Seção 1: O Motivo (Explicação da IA)
+        msg += f"🧠 *Motivo da Saída:*\n"
+        msg += f"_{reason}_\n"
+        if rsi_exit:
+            msg += f"📊 RSI na Saída: **{rsi_exit:.1f}**\n"
+        if market_sentiment:
+            msg += f"🌡️ Sentimento: {market_sentiment}\n"
+        if hold_duration:
+            msg += f"⏳ Duração: {hold_duration}\n"
+            
+        # Contexto ML / Fibo
+        if ml_prob is not None:
+             badge = "💎" if ml_prob >= 70 else "⛔" if ml_prob < 40 else "🤖"
+             msg += f"🧠 ML Score Atual: {ml_prob:.0f}% {badge}\n"
+        if fib_level and str(fib_level) != 'None':
+             msg += f"📐 Fibo Level: {fib_level}\n"
+             
+        msg += "\n"
+
+        # Seção 2: Financeiro
+        msg += f"📥 *Entrada:* ${entry_price:.4f} (Inv: ${entry_cost:.2f})\n"
+        msg += f"📤 *Saída:* ${sell_price:.4f} (Ret: ${sell_gross:.2f})\n\n"
+        
+        # Seção 3: Veredito
+        msg += f"🧾 *Resultado Final:*\n"
+        msg += f"   • Taxas: -${taxas_totais:.3f}\n"
+        msg += f"   • Líquido ($): **${lucro_liquido_usdt:+.2f}**\n"
+        msg += f"   • Líquido (%): **{lucro_liquido_pct:+.2f}%**\n"
+
+        return msg
+    except Exception as e:
+        print(f"⚠️ Erro msg venda: {e}")
+        return f"VENDA {symbol}: {reason} | Lucro: ${lucro_liquido_usdt:.2f}"
+
+
+def execute_real_trade(action, price, symbol, reason=None, amount_usdt=None, extra_indicators=None):
     """Executa trade REAL na Binance (Suporte a MÚLTIPLAS POSIÇÕES; máx 3)."""
     if not exchange or not API_KEY or not SECRET:
         print("⚠️ Modo real desabilitado: sem chaves API")
@@ -2588,7 +2614,29 @@ def execute_real_trade(action, price, symbol, reason=None, amount_usdt=None):
                 pass
 
         if action == 'buy':
-            desired = float(amount_usdt if amount_usdt is not None else AMOUNT_INVEST)
+            # 1. Determina o valor base (Override por Símbolo ou Padrão)
+            base_invest = SYMBOL_INVEST_OVERRIDES.get(symbol, AMOUNT_INVEST)
+            
+            # --- LÓGICA DE JUROS COMPOSTOS (BOLA DE NEVE) ---
+            multiplier = 1.0
+            try:
+                # Tenta pegar o saldo real atualizado (USDT livre + investido se possível, mas aqui usamos o livre por segurança)
+                # O ideal seria equity total, mas vamos usar o saldo livre + valor estimado em ordens para não reduzir a mão
+                current_balance = float(lab_state.get('real_balance', 0))
+                
+                # Se o saldo atual for maior que a base, aplica o multiplicador
+                if current_balance > SALDO_BASE:
+                    multiplier = current_balance / SALDO_BASE
+            except Exception:
+                pass
+            
+            # Aplica o multiplicador ao investimento base
+            final_invest_amount = base_invest * multiplier
+            
+            # 2. Se amount_usdt foi passado (ex: manual), usa ele. Se não, usa o final_invest_amount.
+            desired = float(amount_usdt if amount_usdt is not None else final_invest_amount)
+            
+            # 3. Trava de segurança global
             desired = min(desired, SANDRA["MAX_BET"])
 
             # Limite de posições simultâneas
@@ -2611,6 +2659,14 @@ def execute_real_trade(action, price, symbol, reason=None, amount_usdt=None):
             if desired < min_notional:
                 print(f"⚠️ Ordem abaixo do mínimo (${desired:.2f} < ${min_notional:.2f}). Pulando.")
                 return _block(f"Ordem abaixo do mínimo: ${desired:.2f} < ${min_notional:.2f}")
+
+            # 🚨 CIRCUIT BREAKER: VERIFICA PERDA DIÁRIA
+            daily_loss_val = lab_state['pnl']['day_net']
+            daily_limit_val = SALDO_BASE * (MAX_DAILY_LOSS / 100.0)
+            
+            if daily_loss_val <= daily_limit_val:
+                print(f"🛑 CIRCUIT BREAKER ATIVADO: Perda de ${daily_loss_val:.2f} (Limite: ${daily_limit_val:.2f})")
+                return _block(f"Circuit Breaker ativado: Perda do dia > 3%")
 
             # === COOLDOWN DE 15 MINUTOS (CORREÇÃO APLICADA) ===
             current_time = time.time()
@@ -2644,11 +2700,16 @@ def execute_real_trade(action, price, symbol, reason=None, amount_usdt=None):
             if usdt_balance < required:
                 print(f"⚠️ USDT insuficiente. Tentando converter BRL...")
                 usdt_balance = convert_brl_to_usdt()
-                if usdt_balance < required:
-                    print(f"⚠️ Saldo insuficiente: ${usdt_balance:.2f}")
-                    return _block(f"Saldo insuficiente: ${usdt_balance:.2f} < ${required:.2f}")
+                
+            # 🛡️ PROTEÇÃO DE CAPITAL (Evita All-In em erro de cálculo)
+            # Se a ordem for maior que o saldo livre, reduz para 95% do saldo
+            if invest_amount > usdt_balance:
+                 print(f"⚠️ Ordem ${invest_amount:.2f} > Saldo ${usdt_balance:.2f}. Ajustando...")
+                 invest_amount = usdt_balance * 0.95
 
-            invest_amount = desired
+            if invest_amount < min_notional:
+                 print(f"⚠️ Saldo insuficiente após ajuste: ${invest_amount:.2f}")
+                 return _block(f"Saldo insuficiente: ${invest_amount:.2f} < ${min_notional:.2f}")
 
             # EXECUTA COMPRA
             order = market_buy_by_quote(symbol=symbol, quote_usdt=invest_amount, price_hint=price)
@@ -2673,6 +2734,10 @@ def execute_real_trade(action, price, symbol, reason=None, amount_usdt=None):
                     'order_id': order.get('id', ''),
                     'profit_pct': 0,
                 }
+                
+                # Adiciona indicadores extras (ML, ADX, etc) para relatório completo
+                if extra_indicators and isinstance(extra_indicators, dict):
+                    trade.update(extra_indicators)
                 strategy['trades'].append(trade)
 
                 new_pos = {
@@ -2730,6 +2795,33 @@ def execute_real_trade(action, price, symbol, reason=None, amount_usdt=None):
                 sl_usado = pos_info.get('sl_dinamico', SANDRA.get('STOP_BASE', -3.0))
                 tp_usado = pos_info.get('tp_dinamico', SANDRA.get('TP_SLOW', 5.0))
                 
+                # 🔮 PREVISÕES (NOVO)
+                # Calcula tempo estimado
+                atr_pct_val = sandra_data.get('atr_pct', 0.5) # Default 0.5% se faltar
+                est_mins = ceo_manager.estimate_trade_duration(tp_usado, atr_pct_val)
+                
+                # Calcula projeção de lucro
+                pred_profit_usdt = buy_total * (tp_usado / 100)
+                pred_net_profit = pred_profit_usdt - taxa_est # Desconta taxa entrada (saída paga depois)
+                
+                # Atualiza pos_info com previsões (para Carteira Atual)
+                pos_info['est_duration_mins'] = est_mins
+                pos_info['est_close_time'] = (now_sp() + timedelta(minutes=est_mins)).isoformat()
+                pos_info['pred_profit_usdt'] = pred_net_profit
+                
+                # Atualiza trade (para Histórico)
+                # Como 'trade' é ref na lista, isso atualiza o objeto memoria
+                trade['pred_profit'] = pred_net_profit
+                trade['est_duration'] = est_mins
+                trade['tp_pct'] = tp_usado
+            
+            # GRAVA NO BANCO DE DADOS (CRÍTICO: Faltava isso!)
+            try:
+                 db_record_trade(strategy.get('name', selected), trade)
+                 # db_record_event('trade', f"BUY {symbol}", data=trade) # redundante mas ok
+            except Exception as e:
+                 print(f"⚠️ Erro ao salvar BUY no DB: {e}")
+
             # Preços alvo
             preco_sl = buy_price * (1 + sl_usado / 100)
             preco_tp = buy_price * (1 + tp_usado / 100)
@@ -2754,7 +2846,10 @@ def execute_real_trade(action, price, symbol, reason=None, amount_usdt=None):
                 rsi_15m=sandra_data.get('rsi_15m'),
                 edge_liquido=sandra_data.get('edge_liquido'),
                 regime_btc=sandra_data.get('regime_btc'),
-                tier=sandra_data.get('tier')
+                tier=sandra_data.get('tier'),
+                fib_confluence=sandra_data.get('fib_confluence'),
+                fib_level=sandra_data.get('fib_level'),
+                ml_prob=extra_indicators.get('ml_prob') if extra_indicators else None
             )
 
             # Envia mensagem completa (assíncrono para não atrasar trading)
@@ -2788,6 +2883,17 @@ def execute_real_trade(action, price, symbol, reason=None, amount_usdt=None):
                 lab_state['last_trade_time'] = time.time()
                 # Grava o cooldown específico do par SEMPRE
                 lab_state.setdefault('symbol_cooldowns', {})[symbol] = time.time()
+
+
+            # 📊 Gera planilha atualizada automaticamente
+            if excel_reporter:
+                print("⏳ Aguardando sincronização da Binance para gerar planilha...")
+                time.sleep(5.0) # Garante que o saldo atualizou na API
+                print("📊 Atualizando arquivo Excel (Pós-Compra)...")
+                try:
+                    excel_reporter.generate_report()
+                except Exception as e:
+                    print(f"⚠️ Erro ao atualizar planilha: {e}")
 
             _refresh_primary_position()
             
@@ -2944,13 +3050,19 @@ def execute_real_trade(action, price, symbol, reason=None, amount_usdt=None):
                         strategy.setdefault('last_sl_time', {})[symbol] = time.time()
                         print(f"⛔ STOP LOSS registrado para {symbol} - Cooldown estendido ativado")
 
-                # Histórico eterno (SQLite) + backup do DB após venda
                 try:
                     db_record_trade(strategy.get('name', selected), trade)
                     db_record_event('trade', f"SELL {symbol}", data={'side': 'sell', 'symbol': symbol, 'net_profit_usdt': lucro_liquido_usdt})
                     maybe_backup_db(reason=f"sell:{symbol}")
-                except Exception:
-                    pass
+                    
+                    # 📊 Gera planilha atualizada automaticamente
+                    if excel_reporter:
+                        print("⏳ Aguardando sincronização da Binance para gerar planilha...")
+                        time.sleep(5.0) # Garante que o saldo atualizou na API
+                        print("📊 Atualizando arquivo Excel (Pós-Venda)...")
+                        excel_reporter.generate_report()
+                except Exception as e:
+                    print(f"⚠️ Erro pós-trade: {e}")
                 
                 print(f"💵 VENDA: {symbol} | Líquido: ${lucro_liquido_usdt:+.2f}")
                 
@@ -2962,20 +3074,53 @@ def execute_real_trade(action, price, symbol, reason=None, amount_usdt=None):
                     lab_state['pnl']['day_net'] += lucro_liquido_usdt
                     lab_state['pnl']['total_net'] += lucro_liquido_usdt
 
-                icon = "✅" if lucro_liquido_usdt > 0 else "🔻"
-                msg = (
-                    f"{icon} *VENDA FINALIZADA* | {symbol}\n"
-                    f"Motivo: _{reason or 'Sinal de Saída'}_ \n\n"
-                    f"📥 Comprou: ${entry_price:.4f}\n"
-                    f"📤 Vendeu:  ${sell_price:.4f}\n\n"
-                    f"🧾 *Contabilidade:*\n"
-                    f"Valor Bruto:  ${sell_gross:.2f}\n"
-                    f"(-) Custo:    ${entry_cost:.2f}\n"
-                    f"(-) Taxas:    ${taxas_totais:.3f}\n"
-                    f"━━━━━━━━━━━━━━━━━━\n"
-                    f"💰 *LÍQUIDO: ${lucro_liquido_usdt:+.2f} ({lucro_liquido_pct:+.2f}%)*\n\n"
-                    f"📅 Dia: ${lab_state['pnl']['day_net']:+.2f}"
+                # Calcula duração
+                hold_duration_str = "N/A"
+                if entry_time:
+                    delta = now_sp() - parse_iso_dt(entry_time)
+                    hours, remainder = divmod(delta.total_seconds(), 3600)
+                    minutes, _ = divmod(remainder, 60)
+                    hold_duration_str = f"{int(hours)}h {int(minutes)}m"
+
+                # Tenta pegar RSI/ML/Fibo da saída (cache)
+                rsi_out = None
+                ml_prob_out = None
+                fib_level_out = None
+                
+                try:
+                    # Preferencia para dados passados explicitamente (extra_indicators)
+                    if extra_indicators:
+                        rsi_out = extra_indicators.get('rsi')
+                        ml_prob_out = extra_indicators.get('ml_prob')
+                        
+                    # Fallback para o cache de mercado
+                    with state_lock:
+                        mo = lab_state.get('market_overview', {}).get(symbol, {})
+                        if rsi_out is None: rsi_out = mo.get('rsi')
+                        if ml_prob_out is None: ml_prob_out = mo.get('ml_prob')
+                        fib_level_out = mo.get('fib_level')
+                except:
+                     pass
+
+                msg = _gerar_justificativa_venda(
+                    symbol=symbol,
+                    sell_price=sell_price,
+                    sell_qty=sell_qty,
+                    sell_gross=sell_gross,
+                    entry_price=entry_price,
+                    entry_qty=entry_qty,
+                    entry_cost=entry_cost,
+                    lucro_liquido_usdt=lucro_liquido_usdt,
+                    lucro_liquido_pct=lucro_liquido_pct,
+                    taxas_totais=taxas_totais,
+                    reason=reason,
+                    rsi_exit=rsi_out,
+                    hold_duration=hold_duration_str,
+                    market_sentiment=lab_state.get('market_sentiment', {}).get('sentiment'),
+                    ml_prob=ml_prob_out,
+                    fib_level=fib_level_out
                 )
+                
                 send_telegram_message(msg)
                 send_chart_to_telegram(symbol, caption="Gráfico no momento da VENDA")
                 update_sandra_streak(lucro_liquido_usdt)
@@ -3242,10 +3387,59 @@ def trading_loop():
                 except Exception as e:
                     print(f"⚠️ Erro ao atualizar saldo: {e}")
 
+            # --- SYNC DE POSIÇÕES ÓRFÃS (WLD FIX) ---
+            # Verifica se existem moedas na carteira que o bot "esqueceu"
+            try:
+                bal = exchange.fetch_balance()
+                if strategy:
+                     known_symbols = strategy.get('positions', {}).keys()
+                     for coin, amount in bal['total'].items():
+                         if coin == 'USDT' or amount < 0.00001: continue
+                         
+                         sym = f"{coin}/USDT"
+                         # Se tem saldo mas não está na memória do bot
+                         if sym not in known_symbols:
+                             # Verifica se é um par válido na Binance
+                             try:
+                                 ticker = exchange.fetch_ticker(sym)
+                                 current_price = float(ticker['last'])
+                                 val_usdt = amount * current_price
+                                 
+                                 # Só adota se tiver valor relevante (> $10 ou config) e for monitorável
+                                 if val_usdt > 5.0:
+                                     print(f"🕵️ DETETIVE: Encontrada posição órfã de {sym} (${val_usdt:.2f}). Adotando...")
+                                     
+                                     # Tenta recuperar preço médio do histórico
+                                     entry_price = current_price # Default
+                                     try:
+                                         trade_data = excel_reporter.get_last_trade_data(sym)
+                                         if trade_data and 'price' in trade_data:
+                                             entry_price = float(trade_data['price'])
+                                     except: pass
+
+                                     with state_lock:
+                                         # Cria a posição na memória
+                                         strategy.setdefault('positions', {})[sym] = {
+                                             'symbol': sym,
+                                             'entry_price': entry_price,
+                                             'qty': amount,
+                                             'entry_time': now_iso(),
+                                             'highest_price': current_price,
+                                             'entry_cost_usdt': val_usdt,
+                                             'orphan_recovered': True, # Marker
+                                             'log_entry': f"Recuperado via SyncWallet em {now_sp().strftime('%H:%M')}"
+                                         }
+                                         print(f"✅ Posição {sym} ADOTADA com sucesso!")
+                             except:
+                                 pass # Moeda não listada
+            except Exception as e:
+                print(f"⚠️ Erro no sync de posições: {e}")
+
             for current_symbol in target_coins:
                 # 1. Busca dados brutos e processa no CÉREBRO (Scalper Blindado)
-                # Usa fetch_raw_candles para pegar lista de klines
-                raw_klines = fetch_raw_candles(current_symbol, interval='5m', limit=100)
+                invest_amount = 0.0 # Inicializa variável para evitar erro de escopo
+                # Usa fetch_raw_candles para pegar lista de klines (15m = Candles Maiores/Mais estáveis)
+                raw_klines = fetch_raw_candles(current_symbol, interval='1h', limit=500)
                 
                 if not raw_klines:
                     continue
@@ -3262,6 +3456,8 @@ def trading_loop():
                 vol_now = indicadores.get('vol_now')
                 adx = indicadores.get('adx')
                 atr = indicadores.get('atr')
+                fib_confluence = indicadores.get('fib_confluence', False)
+                fib_data = indicadores.get('fibonacci', {})
                 
                 # Calcula vol_avg (média 20) manualmente pois o scalper não retorna isso ainda
                 try:
@@ -3315,6 +3511,9 @@ def trading_loop():
                             'atr': atr,
                             'bb_lower': bb_lower,
                             'bb_upper': bb_upper,
+                            'ml_prob': indicadores.get('ml_prob', 50.0),
+                            'fib_level': indicadores.get('fibonacci', {}).get('touching_level', 'None') if isinstance(indicadores.get('fibonacci'), dict) else 'None',
+                            'fib_levels': indicadores.get('fibonacci', {}).get('levels', {}) if isinstance(indicadores.get('fibonacci'), dict) else {},
                             'diagnostic': diagnostic,
                             'last_update': datetime.now().strftime('%H:%M:%S')
                         }
@@ -3541,7 +3740,9 @@ def trading_loop():
                                                 'rsi_15m': rsi_15m,
                                                 'edge_liquido': edge_liquido,
                                                 'regime_btc': regime_btc,
-                                                'tier': 'A'
+                                                'tier': 'A',
+                                                'fib_confluence': fib_confluence,
+                                                'fib_level': fib_data.get('touching_level')
                                             }
                                     
                                     else:
@@ -3605,7 +3806,9 @@ def trading_loop():
                                                 'edge_liquido': edge_liquido,
                                                 'regime_btc': regime_btc,
                                                 'tier': 'B',
-                                                'budget_usado': budget_tier_b_max
+                                                'budget_usado': budget_tier_b_max,
+                                                'fib_confluence': fib_confluence,
+                                                'fib_level': fib_data.get('touching_level')
                                             }
                                     
                                     # 🧠 LÓGICA SÁBIA: Bloqueia recompra após SL se tendência de baixa for forte
@@ -3683,15 +3886,62 @@ def trading_loop():
                                             print(f"💎 🧠 IA: SINAL EXCEPCIONAL! Aposta ${invest_amount:.2f}")
                                             print(f"   Confluências: RSI={rsi_val:.1f} | Volume={vol_ratio:.2f}x | Sentimento={sentiment} | ATR={atr_val:.2f}")
                                             print(f"   💰 Fator de Escala (Juro Composto): {fator_escala:.2f}x (Saldo: ${saldo_atual:.2f})")
+                                        # --- CÁLCULO DINÂMICO DE POSIÇÃO (BOLA DE NEVE + SNIPER) ---
+                                        base_tier = 11.0
+                                        multiplier = 1.0
+                                        
+                                        # 1. Juros Compostos
+                                        try:
+                                            # Verifica se o modo Bola de Neve está ativo
+                                            compound_active = globals().get('COMPOUND_ON', True)
+                                            
+                                            if compound_active:
+                                                current_balance = float(lab_state.get('real_balance', 0))
+                                                # Saldo Base padrão $1000 se não definido
+                                                saldo_base_ref = globals().get('SALDO_BASE', 1000.0) 
+                                                if current_balance > saldo_base_ref:
+                                                    multiplier = current_balance / saldo_base_ref
+                                            else:
+                                                multiplier = 1.0 # Modo Juros Simples (Fixo)
+                                                
+                                        except Exception:
+                                            multiplier = 1.0
+
+                                        # 2. Definição do Tier Base pela IA
+                                        if invest_amount >= 33.0:
+                                            base_tier = 33.0
                                         elif invest_amount >= 22.0:
-                                            print(f"🔥 🧠 IA: SINAL FORTE! Aposta ${invest_amount:.2f}")
-                                            print(f"   Confluências: RSI={rsi_val:.1f} | Volume={vol_ratio:.2f}x | Sentimento={sentiment}")
-                                            print(f"   💰 Fator de Escala: {fator_escala:.2f}x")
-                                        elif invest_amount >= 11.0:
-                                            print(f"🚀 🧠 IA: SINAL PADRÃO! Aposta ${invest_amount:.2f}")
-                                            print(f"   RSI={rsi_val:.1f} | 💰 Escala: {fator_escala:.2f}x")
+                                            base_tier = 22.0
                                         else:
-                                            print(f"⚠️ 🧠 IA: Sinal fraco, não aposta (pontuação baixa)")
+                                            base_tier = 11.0
+
+                                        # 3. Sniper Boost (Fibonacci)
+                                        fibo_boost = 1.0
+                                        fibo_conf = indicadores.get('fib_confluence', False)
+                                        if fibo_conf:
+                                            fibo_boost = 1.5  # +50% no tamanho da mão se for Sniper
+
+                                        # Cálculo Final
+                                        final_invest_amount = base_tier * multiplier * fibo_boost
+                                        
+                                        # Trava de Segurança Hard (ex: máx $1000 por bet)
+                                        final_invest_amount = min(final_invest_amount, SANDRA.get("MAX_BET", 500.0))
+                                        
+                                        invest_amount = final_invest_amount
+
+                                        # Logging detalhado
+                                        print(f"💰 DIMENSIONAMENTO DINÂMICO: Base=${base_tier:.0f} | Mult={multiplier:.2f}x | FiboBoost={fibo_boost}x")
+                                        print(f"   💸 Aposta Final: ${invest_amount:.2f}")
+
+                                        if fibo_conf:
+                                            print(f"🔥 🧠 IA: SINAL SNIPER CONFIRMADO! (Fibo 0.618/0.5)")
+                                        elif invest_amount >= 22.0 * multiplier:
+                                            print(f"🔥 🧠 IA: SINAL FORTE! (RSI Baixo)")
+                                        elif invest_amount >= 11.0 * multiplier:
+                                            print(f"🚀 🧠 IA: SINAL PADRÃO")
+                                        else:
+                                            print(f"⚠️ 🧠 IA: Sinal fraco (Ignorado)")
+
                                         
                                         print(f"🧠 Motivo Scalper: {motivo_blindado}")
                                         
@@ -3741,7 +3991,7 @@ def trading_loop():
                                             'block_reason': None,
                                         })
 
-                                    result = execute_real_trade('buy', price, current_symbol, amount_usdt=invest_amount)
+                                    result = execute_real_trade('buy', price, current_symbol, amount_usdt=invest_amount, extra_indicators=indicadores)
 
                                     with state_lock:
                                         lab_state.setdefault('last_decisions', {}).setdefault(current_symbol, {})
@@ -4337,6 +4587,60 @@ def get_report():
         return jsonify({'error': 'Erro ao obter status do sistema'}), 500
 
 
+@app.route('/api/history')
+def get_history_api():
+    """Retorna histórico de trades completo (Banco de Dados)."""
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT timestamp, symbol, side, price, qty, profit_usdt, profit_pct, strategy, json_data
+            FROM trade_history
+            ORDER BY id DESC
+            LIMIT 50
+        ''')
+        rows = cursor.fetchall()
+        
+        # Calculate Global Total PnL (All-Time)
+        cursor.execute("SELECT SUM(profit_usdt) FROM trade_history WHERE side = 'sell'")
+        total_pnl_row = cursor.fetchone()
+        total_pnl = total_pnl_row[0] if total_pnl_row and total_pnl_row[0] else 0.0
+        
+        conn.close()
+
+        history = []
+        for r in rows:
+            # timestamp is iso format
+            ts = r[0]
+            # Try to format nice
+            try:
+                dt = datetime.fromisoformat(ts)
+                if dt.tzinfo is None: dt = dt.replace(tzinfo=TZ)
+                ts_fmt = dt.strftime('%d/%m %H:%M')
+            except:
+                ts_fmt = ts
+
+            history.append({
+                'time': ts_fmt,
+                'symbol': r[1],
+                'side': r[2], # 'buy' / 'sell'
+                'price': r[3],
+                'qty': r[4],
+                'profit': r[5],
+                'profit_pct': r[6],
+                'strategy': r[7],
+                'json_data': r[8] if len(r) > 8 else None
+            })
+
+        return jsonify({
+            'history': history,
+            'total_pnl': total_pnl
+        })
+    except Exception as e:
+        logger.error(f"Erro em /api/history: {e}", exc_info=True)
+        return jsonify({'history': []})
+
+
 @app.route('/api/status')
 def get_status():
     """Retorna estado completo do laboratório."""
@@ -4361,6 +4665,115 @@ def get_logs():
     except Exception as e:
         logger.error(f"Erro em /api/status: {e}", exc_info=True)
         return jsonify({'error': 'Erro ao obter status do sistema'}), 500
+
+
+@app.route('/extrato')
+def web_extrato():
+    """Gera um extrato financeiro visual (HTML) baseado no histórico de vendas."""
+    try:
+        # DB_FILE é a variável global correta (Linha 505)
+        if not DB_FILE or not os.path.exists(DB_FILE):
+            return "<h1>Banco de dados não encontrado (sandra_trading.db)</h1>"
+
+        conn = sqlite3.connect(DB_FILE)
+        # Query idêntica ao script de Excel: Apenas Vendas (Ciclo Fechado)
+        query = "SELECT json_data FROM trade_history WHERE side='sell' ORDER BY timestamp DESC"
+        cursor = conn.cursor()
+        cursor.execute(query)
+        rows = cursor.fetchall()
+        conn.close()
+
+        if not rows:
+            return """
+            <html><head><title>Extrato Vazio</title></head>
+            <body style='background:#121212;color:#fff;font-family:sans-serif;text-align:center;'>
+                <h1>Extrato Sandra 3.1</h1>
+                <p>Nenhuma venda realizada ainda.</p>
+            </body></html>
+            """
+
+        data = []
+        cumulative_profit = 0.0
+        
+        # Processa dados (Simulando Extrato Reverso para facilitar visualização web)
+        for row in rows:
+            t = json.loads(row[0])
+            
+            # Datas
+            ts = t.get('timestamp', '')
+            try:
+                dt_obj = datetime.fromisoformat(ts)
+                date_fmt = dt_obj.strftime('%d/%m/%Y %H:%M')
+            except:
+                date_fmt = ts
+            
+            symbol = t.get('symbol')
+            profit_usdt = float(t.get('net_profit_usdt', 0))
+            profit_pct = float(t.get('net_profit_pct', 0))
+            fees = float(t.get('fees', 0))
+            invested = float(t.get('entry_price', 0)) * float(t.get('qty', 0))
+            
+            # Formatação de cores e ícones
+            res_class = "text-success" if profit_usdt >= 0 else "text-danger"
+            res_icon = "↗️" if profit_usdt >= 0 else "↘️"
+            
+            data.append({
+                'Data': date_fmt,
+                'Moeda': f"<b>{symbol}</b>",
+                'Investido': f"${invested:.2f}",
+                'Resultado ($)': f"<span class='{res_class} fw-bold'>{res_icon} ${profit_usdt:.2f}</span>",
+                'Retorno (%)': f"<span class='{res_class}'>{profit_pct:.2f}%</span>",
+                'Taxas': f"${fees:.4f}"
+            })
+
+        df = pd.DataFrame(data)
+        
+        # Converte para HTML com Bootstrap
+        table_html = df.to_html(classes='table table-dark table-striped table-hover align-middle', escape=False, index=False, justify='center')
+
+        # Template HTML imbutido
+        html = f"""
+        <!DOCTYPE html>
+        <html lang="pt-br">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Extrato | Sandra 3.1</title>
+            <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+            <style>
+                body {{ background-color: #0f0f0f; color: #e0e0e0; font-family: 'Segoe UI', sans-serif; }}
+                .container {{ max-width: 1000px; margin-top: 40px; }}
+                h1 {{ color: #00d4ff; font-weight: 700; margin-bottom: 20px; }}
+                .card {{ background-color: #1e1e1e; border: 1px solid #333; box-shadow: 0 4px 15px rgba(0,0,0,0.5); }}
+                .table-dark {{ --bs-table-bg: #1e1e1e; }}
+                th {{ text-transform: uppercase; font-size: 0.85rem; letter-spacing: 1px; color: #888; }}
+                td {{ font-size: 0.95rem; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="d-flex justify-content-between align-items-center mb-4">
+                    <h1>💳 Extrato Financeiro</h1>
+                    <span class="badge bg-primary fs-6">Sandra 3.1</span>
+                </div>
+                
+                <div class="card p-4">
+                    <div class="table-responsive">
+                        {table_html}
+                    </div>
+                </div>
+                
+                <div class="text-center mt-4 text-muted small">
+                    Gerado automaticamente pelo Sistema de Trading Híbrido.
+                </div>
+            </div>
+        </body>
+        </html>
+        """
+        return html
+
+    except Exception as e:
+        return f"<h1>Erro ao gerar extrato: {e}</h1>"
 
 
 @app.route('/api/position')
@@ -4914,6 +5327,9 @@ async def telegram_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "💬 *Conversa com IA:*\n"
         "/ia - Mostra parâmetros (ou /ia reset)\n"
         "Envie qualquer mensagem para conversar comigo.\n\n"
+        "🔮 *Inteligência Preditiva (Novo):*\n"
+        "/prever MOEDA - Ex: /prever BTC. Análise de tempo, alvos e confiança.\n"
+        "/simular VALOR MOEDA - Ex: /simular 100 SOL. Calcula retorno líquido real.\n\n"
         "🔭 *Caçador + Juiz (automático):*\n"
         "• Caçador adiciona moedas trending (CoinGecko) que existirem na Binance\n"
         "• Juiz (IA) filtra projetos suspeitos antes de entrar no radar\n\n"
@@ -5205,6 +5621,43 @@ async def telegram_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ Erro: {str(e)}")
 
+
+async def telegram_statement(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Envia extrato das últimas operações."""
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT timestamp, symbol, side, price, profit_usdt, profit_pct
+            FROM trade_history
+            WHERE side = 'sell'
+            ORDER BY id DESC
+            LIMIT 5
+        ''')
+        rows = cursor.fetchall()
+        conn.close()
+
+        if not rows:
+            await update.message.reply_text("📂 *Extrato Vazio (Vendas)*\nAinda não há vendas finalizadas registradas no histórico.", parse_mode='Markdown')
+            return
+
+        msg = "📑 *EXTRATO RECENTE (Últimas 5 Vendas)*\n━━━━━━━━━━━━━━━━━━━━━━\n"
+        for r in rows:
+            ts, sym, side, price, profit, pct = r
+            try:
+                dt = datetime.fromisoformat(ts)
+                ts_show = dt.strftime('%d/%m %H:%M')
+            except: ts_show = ts
+            
+            icon = "🟢" if profit > 0 else "🔴"
+            msg += f"{icon} *{sym}* ({ts_show})\n"
+            msg += f"   └ Lucro: *${profit:+.2f} ({pct:+.2f}%)*\n"
+        
+        msg += "\nUse o site para ver o histórico completo."
+        await update.message.reply_text(msg, parse_mode='Markdown')
+    except Exception as e:
+        await update.message.reply_text(f"❌ Erro ao gerar extrato: {e}")
+
 async def telegram_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Força compra de uma moeda específica."""
     try:
@@ -5324,6 +5777,105 @@ async def telegram_ia(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Use `/ia reset` para voltar ao padrão.",
         parse_mode='Markdown'
     )
+
+
+async def telegram_predict(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /prever [MOEDA]
+    Ensina e Prevê com ML e Fibo.
+    """
+    try:
+        args = context.args
+        if not args:
+            await update.message.reply_text("❓ Qual moeda? Ex: /prever BTC")
+            return
+            
+        symbol = args[0].upper()
+        if not symbol.endswith('USDT'): symbol += '/USDT'
+        
+        # Busca dados ao vivo
+        with state_lock:
+             mo = lab_state.get('market_overview', {}).get(symbol, {})
+        
+        # Se não tiver no cache, tenta buscar
+        current_price = float(mo.get('price', 0))
+        atr = float(mo.get('atr', 0))
+        rsi = float(mo.get('rsi', 50))
+        adx = float(mo.get('adx', 25)) # Padrão 25 se não tiver
+        ml_prob = float(mo.get('ml_prob', 50))
+        fib_levels = mo.get('fib_levels', {})
+        
+        if current_price == 0:
+            try:
+                ticker = ex(exchange.fetch_ticker, symbol)
+                current_price = float(ticker['last'])
+                # Tenta pegar candles para ATR rápido
+                ohlcv = ex(exchange.fetch_ohlcv, symbol, '15m', limit=20)
+                if ohlcv:
+                     df = pd.DataFrame(ohlcv, columns=['time','open','high','low','close','vol'])
+                     df['tr'] = np.maximum(df['high'] - df['low'], 
+                                           np.maximum(abs(df['high'] - df['close'].shift()), 
+                                                      abs(df['low'] - df['close'].shift())))
+                     atr = df['tr'].rolling(14).mean().iloc[-1]
+            except:
+                await update.message.reply_text(f"⚠️ Não consegui dados de {symbol}.")
+                return
+
+        report = market_forecaster.generate_prediction_report(
+            symbol=symbol,
+            current_price=current_price,
+            atr=atr,
+            rsi=rsi,
+            ml_prob=ml_prob,
+            fib_levels=fib_levels,
+            adx=adx
+        )
+        
+        await update.message.reply_text(report, parse_mode='Markdown')
+
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Erro na previsão: {e}")
+
+
+async def telegram_simulate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /simular [VALOR] [MOEDA]
+    Simula trade financeiro.
+    """
+    try:
+        args = context.args
+        if len(args) < 2:
+            await update.message.reply_text("❓ Uso: /simular 100 BTC")
+            return
+            
+        amount = float(args[0])
+        symbol = args[1].upper()
+        if not symbol.endswith('USDT'): symbol += '/USDT'
+        
+        # Busca Preço
+        ticker = ex(exchange.fetch_ticker, symbol)
+        current_price = float(ticker['last'])
+        
+        # Usa Forecaster para targets padrão ou define fixo
+        targets = market_forecaster.calculate_targets(current_price, 0, 50, {}, volatility_type="normal")
+        # Mas para simulação, vamos assumir um lucro de 5% (TP padrão)
+        target_price = current_price * 1.05
+        
+        sim = market_forecaster.simulate_trade(amount, current_price, target_price)
+        
+        msg = f"💰 *SIMULAÇÃO FINANCEIRA: {symbol}*\n\n"
+        msg += f"💵 Investimento: ${amount:.2f}\n"
+        msg += f"📥 Entrada: ${current_price:.4f}\n"
+        msg += f"📤 Saída (Alvo +5%): ${target_price:.4f}\n"
+        msg += "-----------------------------\n"
+        msg += f"📉 Custos (Taxas): -${sim['fees']:.2f}\n"
+        msg += f"🤑 *LUCRO LÍQUIDO: +${sim['net_profit']:.2f} ({sim['net_pct']:.2f}%)*\n"
+        
+        await update.message.reply_text(msg, parse_mode='Markdown')
+        
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Erro na simulação: {e}")
+
 
 def get_database_summary():
     """Lê o histórico do DB e retorna resumo para a IA."""
@@ -5527,6 +6079,8 @@ async def process_ai_response(update: Update, context: ContextTypes.DEFAULT_TYPE
                     f"- Preço: {md.get('price')}\n"
                     f"- RSI: {md.get('rsi')}\n"
                     f"- BB Lower: {md.get('bb_lower')}\n"
+                    f"- 🧠 ML Probabilidade: {md.get('ml_prob', 'N/A')}%\n"
+                    f"- 📐 Fibo Level: {md.get('fib_level', 'None')}\n"
                     f"- Diagnóstico: {md.get('diagnostic')}\n"
                 )
             d = last_decisions.get(focus_symbol)
@@ -5601,6 +6155,7 @@ async def telegram_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
+        print(f"👂 Recebendo áudio de {update.effective_user.first_name}...")
         await update.message.reply_text("👂 Ouvindo áudio...")
         await context.bot.send_chat_action(chat_id=update.effective_chat.id, action='typing')
 
@@ -5674,7 +6229,8 @@ if __name__ == '__main__':
         
         # Flask em thread separada
         def run_flask():
-            app.run(host='0.0.0.0', debug=False, port=5000, use_reloader=False, threaded=True)
+            port = int(os.getenv('PORT', 5000))
+            app.run(host='0.0.0.0', debug=False, port=port, use_reloader=False, threaded=True)
         
         flask_thread = threading.Thread(target=run_flask, daemon=True)
         flask_thread.start()
@@ -5685,6 +6241,21 @@ if __name__ == '__main__':
         thread = threading.Thread(target=trading_loop, daemon=True)
         thread.start()
 
+        # 📊 Thread de Atualização Periódica do Excel (A cada 10 min)
+        def run_excel_scheduler():
+            print("🗓️ Agendador de Excel iniciado (10min).")
+            while True:
+                time.sleep(600)  # 10 minutos
+                if excel_reporter:
+                    try:
+                        print("♻️ Atualizando Excel via agendador...")
+                        excel_reporter.generate_report()
+                    except Exception as e:
+                        print(f"⚠️ Erro ao atualizar Excel (agendador): {e}")
+
+        excel_thread = threading.Thread(target=run_excel_scheduler, daemon=True)
+        excel_thread.start()
+
         # --- Scalper Blindado Integrado ao Loop Principal ---
         print("--- 🚀 Scalper Blindado: Módulo Lógico Carregado ---")
 
@@ -5694,10 +6265,11 @@ if __name__ == '__main__':
             print("Inicializando Telegram Bot...")
             telegram_app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
+            # Comandos
             telegram_app.add_handler(CommandHandler("start", telegram_start))
             telegram_app.add_handler(CommandHandler("ajuda", telegram_help))
             telegram_app.add_handler(CommandHandler("help", telegram_help))
-            telegram_app.add_handler(CommandHandler("status", telegram_status))
+            telegram_app.add_handler(CommandHandler("status", telegram_status)) # Faltava este!
             telegram_app.add_handler(CommandHandler("saldo", telegram_balance))
             telegram_app.add_handler(CommandHandler("posicao", telegram_position))
             telegram_app.add_handler(CommandHandler("position", telegram_position))
@@ -5705,6 +6277,8 @@ if __name__ == '__main__':
             telegram_app.add_handler(CommandHandler("coins", telegram_coins))
             telegram_app.add_handler(CommandHandler("relatorio", telegram_report))
             telegram_app.add_handler(CommandHandler("report", telegram_report))
+            telegram_app.add_handler(CommandHandler("extrato", telegram_statement))
+            telegram_app.add_handler(CommandHandler("statment", telegram_statement))
             telegram_app.add_handler(CommandHandler("comprar", telegram_buy))
             telegram_app.add_handler(CommandHandler("buy", telegram_buy))
             telegram_app.add_handler(CommandHandler("converter", telegram_convert))
@@ -5716,14 +6290,27 @@ if __name__ == '__main__':
             telegram_app.add_handler(CommandHandler("desligar", telegram_stop_bot))
             telegram_app.add_handler(CommandHandler("off", telegram_stop_bot))
             telegram_app.add_handler(CommandHandler("ia", telegram_ia))
+            telegram_app.add_handler(CommandHandler("prever", telegram_predict))
+            telegram_app.add_handler(CommandHandler("predict", telegram_predict))
+            telegram_app.add_handler(CommandHandler("simular", telegram_simulate))
+            telegram_app.add_handler(CommandHandler("simulate", telegram_simulate))
             telegram_app.add_handler(CommandHandler("ai", telegram_ia))
             telegram_app.add_handler(MessageHandler(filters.VOICE, telegram_audio))
             telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, telegram_chat))
 
+            print("Telegram pronto. Comandos ativos: /start /ajuda /status /saldo /posicao /moedas /relatorio /comprar /converter /ligar /desligar /ia /prever /simular")
+
+            # Bloqueia aqui (main thread) — Flask + trading seguem em threads
             print("Telegram pronto. Comandos ativos: /start /ajuda /status /saldo /posicao /moedas /relatorio /comprar /converter /ligar /desligar /ia")
 
             # Bloqueia aqui (main thread) — Flask + trading seguem em threads
-            run_telegram_bot()
+            try:
+                run_telegram_bot()
+            except Exception as e:
+                print(f"⚠️ Erro ao rodar Telegram Polling: {e}")
+                # Fallback to keep-alive if polling fails
+                while True:
+                    time.sleep(60)
         else:
             print("Telegram desabilitado (token inválido)")
 
